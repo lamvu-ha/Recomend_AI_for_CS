@@ -11,6 +11,7 @@ Tài liệu tổng quan cho dự án phân tích tác động của AI lên task
 - [Dữ liệu đầu vào và đầu ra](#du-lieu-dau-vao-va-dau-ra)
 - [Cách phân tích](#cach-phan-tich)
 - [Luồng hoạt động](#luong-hoat-dong)
+- [Hình ảnh phân tích](#hinh-anh-phan-tich)
 - [Cách chạy dự án](#cach-chay-du-an)
 - [Cách đọc dashboard](#cach-doc-dashboard)
 - [Cấu trúc thư mục](#cau-truc-thu-muc)
@@ -234,6 +235,21 @@ flowchart TB
     class choose_repo,zip_valid,match_symbol,ai_config,llm_ok decision
     class show_error,final_fallback,final_ai,show_result output
 ```
+
+---
+
+## Hình ảnh phân tích
+
+Các hình dưới đây là ảnh tĩnh sinh từ pipeline trong `outputs/figures/`. Chúng giúp đọc nhanh các pattern chính trước khi mở dashboard tương tác.
+
+![Biểu đồ quadrant so sánh automation exposure và human complementarity theo task](outputs/figures/task_skill_shift_quadrant.png)
+*Figure 1: Quadrant task đặt `automation_exposure_index` trên trục X và `human_complementarity_index` trên trục Y để tách vùng tự động hóa, AI hỗ trợ con người và kỹ năng bền vững.*
+
+![Biểu đồ lệch pha giữa năng lực AI và mong muốn tự động hóa của worker](outputs/figures/capability_desire_mismatch.png)
+*Figure 2: Capability-desire mismatch cho thấy nơi AI có năng lực nhưng worker ít muốn giao, hoặc nơi worker muốn hỗ trợ nhưng công nghệ chưa thật sự sẵn sàng.*
+
+![Biểu đồ các kỹ năng có skill shift pressure cao nhất](outputs/figures/top_skill_shift_pressure.png)
+*Figure 3: Top skill shift pressure xếp hạng các kỹ năng có áp lực chuyển dịch cao, hữu ích để chọn ưu tiên reskilling và phân tích sâu.*
 
 ---
 
