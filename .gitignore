@@ -1,4 +1,22 @@
-.ipynb_checkpoints/
+# Environment variables - do not commit secrets
+.env
+
+# Local agent/editor config
+.agents/
+.vscode/
+
+# Python cache
 __pycache__/
 *.pyc
-outputs/
+*.pyo
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Streamlit cache and logs
+.streamlit/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
