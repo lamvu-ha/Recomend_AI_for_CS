@@ -8,14 +8,11 @@ Tài liệu tổng quan cho dự án phân tích tác động của AI lên task
 
 - [Tổng quan](#tong-quan)
 - [Mục tiêu phân tích](#muc-tieu-phan-tich)
+- [Sự chuyển dịch kỹ năng](#su-chuyen-dich-ky-nang)
 - [Dữ liệu đầu vào và đầu ra](#du-lieu-dau-vao-va-dau-ra)
 - [Cách phân tích](#cach-phan-tich)
 - [Luồng hoạt động](#luong-hoat-dong)
 - [Hình ảnh phân tích](#hinh-anh-phan-tich)
-- [Cách chạy dự án](#cach-chay-du-an)
-- [Cách đọc dashboard](#cach-doc-dashboard)
-- [Cấu trúc thư mục](#cau-truc-thu-muc)
-- [Lưu ý diễn giải](#luu-y-dien-giai)
 
 ---
 
@@ -45,6 +42,52 @@ Kết quả mong muốn là một bản đồ chuyển dịch kỹ năng:
 - Kỹ năng bền vững vì cần human agency cao
 - Nhóm nghề/ngành cần ưu tiên reskilling
 - Vùng lệch pha giữa năng lực AI và mong muốn của worker
+
+---
+
+## Sự chuyển dịch kỹ năng
+
+Trong dự án này, **chuyển dịch kỹ năng** không được hiểu đơn giản là AI thay thế con người. Cách đọc chính là: khi AI tham gia vào một task, vai trò của kỹ năng con người có thể đổi từ trực tiếp thực hiện sang đặt mục tiêu, kiểm tra đầu ra, xử lý ngoại lệ, giải thích quyết định, phối hợp với người khác và chịu trách nhiệm cuối cùng.
+
+Ví dụ, một kỹ năng như phân tích dữ liệu không nhất thiết biến mất. Nó có thể dịch từ việc tự xử lý bảng và vẽ biểu đồ sang việc đặt câu hỏi đúng, chọn dữ liệu phù hợp, kiểm định kết quả AI, phát hiện sai lệch và diễn giải insight cho người ra quyết định.
+
+```mermaid
+flowchart LR
+    accTitle: Skill Shift Paths
+    accDescr: Diagram showing how an original human task can shift into automation, AI augmentation, durable human work, or reskilling priority depending on AI capability and human complementarity.
+
+    task([Human task]) --> assess[Measure AI and human signals]
+    assess --> exposure{High AI exposure?}
+    exposure -->|Yes| complement{High human complementarity?}
+    exposure -->|No| durable[Durable human skill]
+    complement -->|Low| automate[Automation candidate]
+    complement -->|High| augment[AI augmented skill]
+    automate --> reskill[Reskilling priority]
+    augment --> reskill
+    durable --> monitor[Monitor future signals]
+
+    classDef start fill:#f3f4f6,stroke:#6b7280,stroke-width:2px,color:#1f2937
+    classDef process fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
+    classDef decision fill:#fef9c3,stroke:#ca8a04,stroke-width:2px,color:#713f12
+    classDef output fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+
+    class task start
+    class assess,reskill,monitor process
+    class exposure,complement decision
+    class durable,automate,augment output
+```
+
+Các hướng chuyển dịch chính:
+
+| Hướng chuyển dịch | Trước khi có AI | Sau khi AI tham gia | Hàm ý đào tạo lại |
+| --- | --- | --- | --- |
+| Tự động hóa một phần | Con người làm nhiều bước lặp lại | AI xử lý phần có cấu trúc, con người kiểm tra kết quả | Học cách đánh giá lỗi, đặt tiêu chí và kiểm soát chất lượng |
+| AI hỗ trợ con người | Con người tự tìm, tổng hợp, soạn hoặc phân tích | AI tạo bản nháp/gợi ý, con người chọn lọc và chịu trách nhiệm | Học prompt, phản biện output và kết hợp domain knowledge |
+| Nâng cấp kỹ năng con người | Kỹ năng nằm ở thao tác thực thi | Giá trị chuyển sang phán đoán, giao tiếp, đạo đức, xử lý ngoại lệ | Tập trung vào judgment, communication và accountability |
+| Kỹ năng bền vững | Task phụ thuộc mạnh vào bối cảnh, con người hoặc vật lý | AI chỉ hỗ trợ gián tiếp hoặc chưa tác động rõ | Theo dõi tín hiệu mới, chưa vội kết luận thay thế |
+| Lệch pha năng lực - mong muốn | Worker muốn hoặc không muốn AI làm thay | Năng lực AI và nhu cầu thực tế không khớp nhau | Xác định rào cản adoption: niềm tin, rủi ro, trách nhiệm hoặc UX |
+
+Vì vậy, dashboard nên được đọc như bản đồ **tái cấu trúc kỹ năng**. `skill_shift_pressure` cao cho biết nơi kỹ năng có khả năng đổi cách làm mạnh hơn, còn `human_complementarity_index` cao nhắc rằng con người vẫn giữ vai trò quan trọng dù AI có thể hỗ trợ nhiều.
 
 ---
 
@@ -250,135 +293,3 @@ Các hình dưới đây là ảnh tĩnh sinh từ pipeline trong `outputs/figur
 
 ![Biểu đồ các kỹ năng có skill shift pressure cao nhất](outputs/figures/top_skill_shift_pressure.png)
 *Figure 3: Top skill shift pressure xếp hạng các kỹ năng có áp lực chuyển dịch cao, hữu ích để chọn ưu tiên reskilling và phân tích sâu.*
-
----
-
-## Cách chạy dự án
-
-### Yêu cầu
-
-| Thành phần | Gợi ý |
-| --- | --- |
-| Python | 3.10 trở lên |
-| Streamlit | Dùng để chạy dashboard |
-| pandas, numpy | Xử lý bảng |
-| plotly | Vẽ biểu đồ tương tác |
-| python-dotenv | Đọc `.env` |
-| openai | Gọi LLM trong chế độ Code Agent IDE nếu có API key |
-
-### Cài đặt nhanh
-
-Hiện repo chưa có `requirements.txt`, có thể cài trực tiếp các package đang được import trong app:
-
-```bash
-pip install streamlit pandas numpy plotly python-dotenv openai
-```
-
-### Chạy dashboard
-
-```bash
-streamlit run streamlit_app.py
-```
-
-Nếu app báo thiếu output bắt buộc, hãy chạy lại notebook:
-
-```bash
-jupyter notebook ai_skill_shift_research.ipynb
-```
-
-Sau khi notebook sinh lại các file trong `outputs/`, chạy lại Streamlit.
-
-### Cấu hình AI tùy chọn
-
-Chế độ `Code Agent IDE` có thể chạy fallback local nếu không có API key. Nếu muốn gọi LLM thật, tạo hoặc cập nhật `.env` với một trong hai nhóm biến:
-
-```bash
-OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-4o-mini
-OPENAI_BASE_URL=
-```
-
-Hoặc:
-
-```bash
-DASHSCOPE_API_KEY=...
-DASHSCOPE_MODEL=qwen-plus
-DASHSCOPE_BASE_URL=...
-```
-
-Để tắt gọi AI thật:
-
-```bash
-AGENT_DISABLE_AI=1
-```
-
----
-
-## Cách đọc dashboard
-
-Dashboard có hai chế độ ở sidebar:
-
-| Chế độ | Mục đích |
-| --- | --- |
-| `Dashboard phân tích` | Xem kết quả chuyển dịch kỹ năng, lọc theo ngành/nghề/task/nhãn và tải bảng CSV |
-| `Code Agent IDE` | Demo giao diện agent đọc repo, tìm symbol, trả lời câu hỏi và hiển thị trace công cụ |
-
-Trong `Dashboard phân tích`, các bộ lọc chính gồm:
-
-- `Ngành`: giới hạn dữ liệu theo sector
-- `Tìm nghề hoặc task`: tìm literal trong occupation hoặc task
-- `Loại chuyển dịch`: lọc theo `transition_type`
-- `Loại lệch pha`: lọc theo `mismatch_type`
-- `Số dòng top trong biểu đồ`: đổi số item trong ranking
-- `Chỉ dùng ranking đủ tin cậy`: ưu tiên bảng kỹ năng có tín hiệu đáng tin hơn
-
-Cách đọc biểu đồ quadrant:
-
-| Vùng | Diễn giải |
-| --- | --- |
-| Exposure cao, complementarity thấp | Nghiêng về tự động hóa |
-| Exposure cao, complementarity cao | AI hỗ trợ con người, không nên đọc là thay thế hoàn toàn |
-| Exposure thấp, complementarity cao | Kỹ năng con người còn bền |
-| Exposure thấp, complementarity thấp | Tác động AI ngắn hạn chưa rõ hoặc task ngoại biên |
-
----
-
-## Cấu trúc thư mục
-
-```text
-.
-|-- streamlit_app.py
-|-- ai_skill_shift_research.ipynb
-|-- task_statement_with_metadata.csv
-|-- domain_worker_desires.csv
-|-- domain_worker_metadata.csv
-|-- expert_rated_technological_capability.csv
-|-- external_data/
-|   |-- usage_from_anthropic.csv
-|   |-- paper_to_workflow_mapping_aggregated.csv
-|   |-- company_to_workflow_aggregation.csv
-|   |-- M2024_bls_wage_data.csv
-|   |-- bls_age.csv
-|   |-- bls_race_gender.csv
-|   `-- onet_data/
-|-- outputs/
-|   |-- task_ai_skill_shift.csv
-|   |-- skill_shift_summary.csv
-|   |-- reliable_skill_shift_summary.csv
-|   |-- occupation_shift_summary.csv
-|   |-- sector_shift_summary.csv
-|   |-- worker_group_summary.csv
-|   |-- regression_exploratory_occupation_shift.csv
-|   |-- regression_exploratory_sector_shift.csv
-|   |-- initial_insights.md
-|   `-- figures/
-`-- README.md
-```
-
----
-
-## Lưu ý diễn giải
-
-Các ranking trong dự án nên được đọc như công cụ ưu tiên phân tích và reskilling, không phải dự báo chắc chắn về mất việc. Một task có `automation_exposure_index` cao vẫn có thể cần con người nếu `human_complementarity_index` cao. Ngược lại, một task có worker desire cao nhưng capability thấp có thể là vùng nhu cầu chưa được công nghệ đáp ứng.
-
-Coverage cũng rất quan trọng. Một số tín hiệu worker/expert chỉ phủ khoảng một phần của toàn bộ task, nên dashboard luôn cần được đọc cùng các cột `has_worker_signal`, `has_expert_signal`, `paired_worker_expert_signal` và `signal_count`.
