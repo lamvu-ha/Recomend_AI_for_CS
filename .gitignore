@@ -16,6 +16,7 @@ __pycache__/
 # Streamlit cache and logs
 .streamlit/
 *.log
+outputs/uploaded_repos/
 
 # OS files
 .DS_Store

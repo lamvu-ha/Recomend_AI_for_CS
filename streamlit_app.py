@@ -1,146 +1,215 @@
-﻿from __future__ import annotations
-
-import io
+import json
 import os
-import re
+import hashlib
 import zipfile
+import re
+import subprocess
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
 
 
-ROOT = Path(__file__).resolve().parent
-OUTPUT_DIR = ROOT / "outputs"
-FIGURE_DIR = OUTPUT_DIR / "figures"
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = BASE_DIR / "outputs"
+load_dotenv(BASE_DIR / ".env")
 
-load_dotenv(ROOT / ".env")
-
-REQUIRED_TABLES = {
-    "task": OUTPUT_DIR / "task_ai_skill_shift.csv",
-    "skill": OUTPUT_DIR / "skill_shift_summary.csv",
-    "reliable_skill": OUTPUT_DIR / "reliable_skill_shift_summary.csv",
-    "occupation": OUTPUT_DIR / "occupation_shift_summary.csv",
-    "sector": OUTPUT_DIR / "sector_shift_summary.csv",
-    "worker_group": OUTPUT_DIR / "worker_group_summary.csv",
+PALETTE = {
+    "ink": "#17324D",
+    "teal": "#129C9A",
+    "coral": "#EF6F52",
+    "gold": "#DDBF6F",
+    "slate": "#69717D",
+    "mist": "#E8EEF2",
+    "paper": "#FBFAF7",
 }
 
-OPTIONAL_TABLES = {
-    "model_occupation": OUTPUT_DIR / "regression_exploratory_occupation_shift.csv",
-    "model_sector": OUTPUT_DIR / "regression_exploratory_sector_shift.csv",
+REC_COLORS = {
+    "Agent bán tự động": PALETTE["teal"],
+    "Copilot + review bắt buộc": PALETTE["coral"],
+    "Con người dẫn dắt, AI hỗ trợ": PALETTE["gold"],
+    "Thử nghiệm / theo dõi": PALETTE["slate"],
+    "Cần thêm dữ liệu": "#B8B8B8",
 }
 
-SCORE_COLUMNS = [
+REG_FEATURES = [
     "automation_exposure_index",
     "worker_pull_index",
     "human_complementarity_index",
     "innovation_momentum_index",
-    "skill_shift_pressure",
+    "expert_uncertainty_requirement",
+    "expert_domain_expertise_requirement",
+    "quality_critical_task",
 ]
+
+FEATURE_LABELS = {
+    "automation_exposure_index": "Mức tiếp xúc AI",
+    "worker_pull_index": "Worker muốn AI",
+    "human_complementarity_index": "Mức cần con người",
+    "innovation_momentum_index": "Động lực đổi mới",
+    "expert_uncertainty_requirement": "Độ bất định",
+    "expert_domain_expertise_requirement": "Yêu cầu chuyên môn miền",
+    "quality_critical_task": "Task critical về chất lượng",
+}
 
 
 st.set_page_config(
-    page_title="Dashboard chuyển dịch kỹ năng AI",
-    page_icon=":bar_chart:",
+    page_title="AI Agent và sự dịch chuyển kỹ năng",
+    page_icon="",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
-
 
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
-    [data-testid="stMetricValue"] {font-size: 1.65rem;}
-    [data-testid="stMetricLabel"] {font-size: 0.82rem;}
-    .small-note {color: #64748b; font-size: 0.9rem; line-height: 1.4;}
-    .section-title {font-size: 1.1rem; font-weight: 700; margin: 0.4rem 0 0.2rem;}
-    .insight-card {
-        border: 1px solid #e2e8f0;
+    :root {
+        --ink: #17324D;
+        --teal: #129C9A;
+        --coral: #EF6F52;
+        --gold: #DDBF6F;
+        --paper: #FBFAF7;
+    }
+    .stApp {
+        background: #FBFAF7;
+        color: var(--ink);
+    }
+    h1, h2, h3 {
+        color: var(--ink);
+        letter-spacing: 0;
+    }
+    [data-testid="stMetric"] {
+        background: #FFFFFF;
+        border: 1px solid #E6E1D8;
+        padding: 14px 16px;
         border-radius: 8px;
-        padding: 0.8rem 0.9rem;
-        background: #f8fafc;
-        min-height: 132px;
+        box-shadow: 0 1px 2px rgba(23, 50, 77, 0.06);
     }
-    .insight-card strong {
-        color: #0f172a;
-        font-size: 0.92rem;
-    }
-    .insight-card p {
-        color: #475569;
-        font-size: 0.88rem;
-        line-height: 1.35;
-        margin: 0.35rem 0 0;
-    }
-    .agent-shell {
-        border: 1px solid #1e293b;
+    .explain-box {
+        background: #FFFFFF;
+        border-left: 5px solid var(--teal);
         border-radius: 8px;
-        background: #0f172a;
-        color: #e5e7eb;
-        padding: 0.9rem;
-        margin: 0.4rem 0 1rem;
+        padding: 16px 18px;
+        margin: 8px 0 18px 0;
+        box-shadow: 0 1px 2px rgba(23, 50, 77, 0.06);
     }
-    .agent-panel {
-        border: 1px solid #e2e8f0;
+    .warning-box {
+        background: #FFF7EE;
+        border-left: 5px solid var(--coral);
         border-radius: 8px;
-        background: #ffffff;
-        padding: 0.85rem;
-        min-height: 116px;
+        padding: 16px 18px;
+        margin: 8px 0 18px 0;
     }
-    .agent-panel-dark {
-        border: 1px solid #334155;
+    .path-card {
+        background: #FFFFFF;
+        border: 1px solid #E6E1D8;
         border-radius: 8px;
-        background: #111827;
-        color: #dbeafe;
-        padding: 0.8rem;
+        padding: 14px 16px;
+        height: 100%;
     }
-    .agent-title {
-        font-size: 0.96rem;
+    .path-title {
         font-weight: 700;
-        margin-bottom: 0.25rem;
+        color: var(--ink);
+        margin-bottom: 8px;
     }
-    .agent-muted {
-        color: #94a3b8;
-        font-size: 0.86rem;
-        line-height: 1.35;
+    .small-note {
+        color: #59646F;
+        font-size: 0.94rem;
     }
-    .agent-status {
-        display: inline-block;
-        border: 1px solid #38bdf8;
+    .solution-panel {
+        background: #FFFFFF;
+        border: 1px solid #D7DEE8;
+        border-radius: 8px;
+        padding: 16px;
+        min-height: 620px;
+    }
+    .solution-title {
+        font-weight: 700;
+        color: var(--ink);
+        border-bottom: 1px solid #E5EAF0;
+        margin: -16px -16px 16px -16px;
+        padding: 12px 16px;
+    }
+    .level-rail {
+        height: 12px;
         border-radius: 999px;
-        padding: 0.18rem 0.55rem;
-        color: #bae6fd;
-        font-size: 0.78rem;
-        font-weight: 700;
-        margin-bottom: 0.45rem;
+        background: linear-gradient(90deg, #4FC16E 0%, #F4C542 50%, #EF6F52 100%);
+        margin: 18px 6px 8px 6px;
+        position: relative;
     }
-    .agent-file {
-        border-left: 3px solid #38bdf8;
-        padding-left: 0.55rem;
-        margin: 0.3rem 0;
-        color: #cbd5e1;
+    .level-marker {
+        width: 22px;
+        height: 22px;
+        border-radius: 999px;
+        border: 3px solid #17324D;
+        background: #FFFFFF;
+        position: relative;
+        top: -5px;
+        box-shadow: 0 1px 4px rgba(23, 50, 77, 0.24);
+    }
+    .level-labels {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        color: #6B7280;
+        font-size: 0.78rem;
+        margin: 0 2px 12px 2px;
+        text-align: center;
+    }
+    .selected-level {
+        background: #EAF2FF;
+        border-radius: 8px;
+        padding: 14px 16px;
+        color: #174A8B;
+        margin: 14px 0;
+    }
+    .compact-row {
+        display: grid;
+        grid-template-columns: 1.3fr 0.55fr 0.55fr 0.55fr 0.75fr;
+        gap: 8px;
+        align-items: center;
+        border: 1px solid #DFE6EF;
+        border-left: 4px solid #EF6F52;
+        border-radius: 7px;
+        padding: 10px 12px;
+        margin: 8px 0;
         font-size: 0.86rem;
     }
-    .agent-trace {
-        border: 1px solid #cbd5e1;
-        border-radius: 8px;
-        padding: 0.65rem;
-        background: #f8fafc;
-        font-size: 0.88rem;
-        line-height: 1.45;
+    .level-pill {
+        background: #EF3F3F;
+        color: #FFFFFF;
+        border-radius: 7px;
+        padding: 6px 8px;
+        text-align: center;
+        font-weight: 700;
+        font-size: 0.78rem;
     }
-    .risk-note {
-        border-left: 3px solid #0ea5e9;
-        padding: 0.5rem 0.65rem;
-        background: #f0f9ff;
-        color: #0f172a;
-        font-size: 0.88rem;
-        line-height: 1.4;
-        margin: 0.4rem 0;
+    .pr-card {
+        border: 1px solid #D7DEE8;
+        border-radius: 8px;
+        padding: 14px 16px;
+        background: #FFFFFF;
+        margin-top: 16px;
+    }
+    .pr-header {
+        background: #2F73B9;
+        color: #FFFFFF;
+        border-radius: 5px;
+        padding: 10px 12px;
+        font-weight: 700;
+        margin-bottom: 12px;
+    }
+    .success-note {
+        background: #F0FFF5;
+        border: 1px dashed #2DBE65;
+        border-radius: 6px;
+        padding: 10px 12px;
+        margin-top: 14px;
+        text-align: center;
+        color: #24583B;
     }
     </style>
     """,
@@ -148,1179 +217,2419 @@ st.markdown(
 )
 
 
-@st.cache_data(show_spinner=False)
-def read_csv(path: Path) -> pd.DataFrame:
+@st.cache_data
+def read_csv(name: str) -> pd.DataFrame:
+    path = OUTPUT_DIR / name
+    if not path.exists():
+        return pd.DataFrame()
     return pd.read_csv(path)
 
 
-def load_tables() -> tuple[dict[str, pd.DataFrame], list[Path]]:
-    missing = [path for path in REQUIRED_TABLES.values() if not path.exists()]
-    tables: dict[str, pd.DataFrame] = {}
-    if missing:
-        return tables, missing
+@st.cache_data
+def load_data() -> dict[str, pd.DataFrame]:
+    return {
+        "tasks": read_csv("cs_agent_task_recommendations.csv"),
+        "task_groups": read_csv("cs_task_group_summary.csv"),
+        "occupations": read_csv("cs_occupation_agent_summary.csv"),
+        "ols": read_csv("cs_regression_quality_risk_ols.csv"),
+        "logit": read_csv("cs_regression_copilot_review_logit.csv"),
+        "reg_ref": read_csv("cs_regression_reference.csv"),
+        "pathway": read_csv("cs_skill_shift_pathway.csv"),
+        "reskill_occ": read_csv("cs_reskilling_priority_by_occupation.csv"),
+        "reskill_group": read_csv("cs_reskilling_priority_by_task_group.csv"),
+        "reskill_task": read_csv("cs_reskilling_priority_by_task.csv"),
+        "raw_tasks": read_csv("task_ai_skill_shift.csv"),
+    }
 
-    for name, path in REQUIRED_TABLES.items():
-        tables[name] = read_csv(path)
 
-    for name, path in OPTIONAL_TABLES.items():
-        if path.exists():
-            tables[name] = read_csv(path)
-
-    return tables, []
-
-
-def pct(value: float | int | None) -> str:
-    if value is None or pd.isna(value):
-        return "n/a"
+def pct(value: float) -> str:
+    if pd.isna(value):
+        return "Chưa đủ dữ liệu"
     return f"{value:.1%}"
 
 
-def num(value: float | int | None, digits: int = 2) -> str:
-    if value is None or pd.isna(value):
-        return "n/a"
-    return f"{value:,.{digits}f}"
-
-
-def choose_columns(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-    return frame[[col for col in columns if col in frame.columns]].copy()
-
-
-def filtered_tasks(
-    task: pd.DataFrame,
-    sectors: list[str],
-    occupation_query: str,
-    transition_types: list[str],
-    mismatch_types: list[str],
-) -> pd.DataFrame:
-    out = task.copy()
-    if sectors:
-        out = out[out["sector"].isin(sectors)]
-    if occupation_query:
-        query = occupation_query.strip().lower()
-        out = out[
-            out["Occupation (O*NET-SOC Title)"].astype(str).str.lower().str.contains(query)
-            | out["Task"].astype(str).str.lower().str.contains(query)
-        ]
-    if transition_types:
-        out = out[out["transition_type"].isin(transition_types)]
-    if mismatch_types:
-        out = out[out["mismatch_type"].isin(mismatch_types)]
-    return out
-
-
-def filter_by_task_scope(frame: pd.DataFrame, task_scope: pd.DataFrame, key_col: str) -> pd.DataFrame:
-    if frame.empty or key_col not in frame.columns:
-        return frame
-    if key_col == "Occupation (O*NET-SOC Title)":
-        allowed = set(task_scope[key_col].dropna().unique())
-    elif key_col == "sector":
-        allowed = set(task_scope["sector"].dropna().unique())
-    else:
-        return frame
-    return frame[frame[key_col].isin(allowed)].copy()
-
-
-def horizontal_bar(
-    frame: pd.DataFrame,
-    x: str,
-    y: str,
-    color: str | None = None,
-    title: str | None = None,
-    height: int = 460,
-):
-    if frame.empty:
-        st.info("Không có dòng nào khớp với bộ lọc hiện tại.")
-        return
-    fig = px.bar(
-        frame.iloc[::-1],
-        x=x,
-        y=y,
-        orientation="h",
-        color=color,
-        title=title,
-        color_continuous_scale="Tealgrn",
-    )
-    fig.update_layout(height=height, margin=dict(l=8, r=8, t=48, b=8))
-    st.plotly_chart(fig, width="stretch")
-
-
-def first_or_na(frame: pd.DataFrame, column: str) -> str:
-    if frame.empty or column not in frame.columns:
-        return "n/a"
-    value = frame.iloc[0][column]
+def score(value: float) -> str:
     if pd.isna(value):
-        return "n/a"
-    return str(value)
+        return "NA"
+    return f"{value:.2f}"
 
 
-def concise_task(text: str, max_len: int = 130) -> str:
-    text = " ".join(str(text).split())
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 3].rstrip() + "..."
+def clean_tasks(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    df = df.copy()
+    for col in [
+        "code_acceleration_potential",
+        "quality_risk_need",
+        "automation_exposure_index",
+        "worker_pull_index",
+        "human_complementarity_index",
+        "innovation_momentum_index",
+        "expert_uncertainty_requirement",
+        "expert_domain_expertise_requirement",
+    ]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "quality_critical_task" in df.columns:
+        df["quality_critical_task"] = df["quality_critical_task"].fillna(False).astype(bool)
+    return df
 
 
-def insight_card(title: str, body: str) -> None:
+def apply_filters(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    filtered = df.copy()
+    with st.sidebar:
+        st.header("Bộ lọc")
+        groups = sorted(filtered["task_group_vi"].dropna().unique().tolist())
+        selected_groups = st.multiselect(
+            "Nhóm task",
+            groups,
+            default=groups,
+            help="Lọc theo nhóm công việc trong ngành khoa học máy tính.",
+        )
+        if selected_groups:
+            filtered = filtered[filtered["task_group_vi"].isin(selected_groups)]
+
+        recs = list(REC_COLORS.keys())
+        selected_recs = st.multiselect(
+            "Khuyến nghị AI Agent",
+            recs,
+            default=recs,
+            help="So sánh các mức triển khai AI Agent khác nhau.",
+        )
+        if selected_recs:
+            filtered = filtered[filtered["agent_recommendation"].isin(selected_recs)]
+
+        occ_options = sorted(filtered["Occupation (O*NET-SOC Title)"].dropna().unique().tolist())
+        selected_occ = st.selectbox(
+            "Nghề cụ thể",
+            ["Tất cả"] + occ_options,
+            help="Chọn một nghề để xem task liên quan rõ hơn.",
+        )
+        if selected_occ != "Tất cả":
+            filtered = filtered[filtered["Occupation (O*NET-SOC Title)"].eq(selected_occ)]
+
+        st.caption("Các bộ lọc này áp dụng cho bảng task và bản đồ AI Agent ở tab 1.")
+    return filtered
+
+
+def metric_row(tasks: pd.DataFrame, filtered: pd.DataFrame) -> None:
+    total = len(tasks)
+    visible = len(filtered)
+    review_count = int(filtered["agent_recommendation"].eq("Copilot + review bắt buộc").sum())
+    critical_share = filtered["quality_critical_task"].mean() if visible else np.nan
+    avg_accel = filtered["code_acceleration_potential"].mean() if visible else np.nan
+    avg_risk = filtered["quality_risk_need"].mean() if visible else np.nan
+
+    cols = st.columns(5)
+    cols[0].metric("Task trong ngành CS", f"{visible}/{total}")
+    cols[1].metric("Tiềm năng tăng tốc code", score(avg_accel))
+    cols[2].metric("Nhu cầu kiểm soát chất lượng", score(avg_risk))
+    cols[3].metric("Task critical", pct(critical_share))
+    cols[4].metric("Cần Copilot + review", f"{review_count} task")
+
+
+def agent_quadrant(df: pd.DataFrame) -> go.Figure:
+    plot_df = df.dropna(subset=["code_acceleration_potential", "quality_risk_need"]).copy()
+    if plot_df.empty:
+        return go.Figure()
+
+    x_line = plot_df["code_acceleration_potential"].median()
+    y_line = plot_df["quality_risk_need"].median()
+    plot_df["task_short"] = plot_df["Task"].astype(str).str.wrap(75).str.replace("\n", "<br>")
+
+    fig = px.scatter(
+        plot_df,
+        x="code_acceleration_potential",
+        y="quality_risk_need",
+        color="agent_recommendation",
+        color_discrete_map=REC_COLORS,
+        size=np.clip(plot_df.get("task_importance_weight", pd.Series(1, index=plot_df.index)).fillna(1), 0.2, None),
+        hover_data={
+            "Occupation (O*NET-SOC Title)": True,
+            "task_group_vi": True,
+            "quality_critical_task": True,
+            "code_acceleration_potential": ":.2f",
+            "quality_risk_need": ":.2f",
+            "agent_recommendation": True,
+            "Task": False,
+            "task_short": True,
+        },
+        labels={
+            "code_acceleration_potential": "Tiềm năng tăng tốc code",
+            "quality_risk_need": "Nhu cầu kiểm soát chất lượng",
+            "agent_recommendation": "Khuyến nghị",
+            "task_short": "Task",
+            "task_group_vi": "Nhóm task",
+            "quality_critical_task": "Task critical",
+        },
+    )
+    fig.add_vline(x=x_line, line_dash="dash", line_color=PALETTE["slate"], opacity=0.7)
+    fig.add_hline(y=y_line, line_dash="dash", line_color=PALETTE["slate"], opacity=0.7)
+    fig.add_annotation(
+        x=0.98,
+        y=0.98,
+        xref="paper",
+        yref="paper",
+        text="Tăng tốc cao + rủi ro cao: cần review/test",
+        showarrow=False,
+        align="right",
+        bgcolor="rgba(255,255,255,0.82)",
+        bordercolor="#E6E1D8",
+    )
+    fig.update_traces(marker=dict(line=dict(width=0.7, color="white"), opacity=0.82))
+    fig.update_layout(
+        height=560,
+        margin=dict(l=10, r=10, t=35, b=10),
+        title="Bản đồ AI Agent: tăng tốc code so với rủi ro chất lượng",
+        plot_bgcolor="#FBFAF7",
+        paper_bgcolor="#FBFAF7",
+        legend_title_text="Khuyến nghị",
+    )
+    return fig
+
+
+def group_signal_chart(group_df: pd.DataFrame) -> go.Figure:
+    if group_df.empty:
+        return go.Figure()
+    cols = [
+        "code_acceleration_potential",
+        "quality_risk_need",
+        "human_complementarity_index",
+    ]
+    label_map = {
+        "code_acceleration_potential": "Tăng tốc code",
+        "quality_risk_need": "Rủi ro chất lượng",
+        "human_complementarity_index": "Cần con người",
+    }
+    long_df = group_df[["task_group_vi", "task_count"] + cols].melt(
+        id_vars=["task_group_vi", "task_count"],
+        value_vars=cols,
+        var_name="signal",
+        value_name="score",
+    )
+    long_df["signal_vi"] = long_df["signal"].map(label_map)
+    fig = px.bar(
+        long_df,
+        y="task_group_vi",
+        x="score",
+        color="signal_vi",
+        barmode="group",
+        orientation="h",
+        color_discrete_map={
+            "Tăng tốc code": PALETTE["teal"],
+            "Rủi ro chất lượng": PALETTE["coral"],
+            "Cần con người": PALETTE["gold"],
+        },
+        labels={"score": "Điểm trung bình", "task_group_vi": "", "signal_vi": "Tín hiệu"},
+        hover_data={"task_count": True},
+    )
+    fig.update_layout(
+        height=420,
+        margin=dict(l=10, r=10, t=35, b=10),
+        title="Tín hiệu theo nhóm task",
+        plot_bgcolor="#FBFAF7",
+        paper_bgcolor="#FBFAF7",
+        legend_title_text="",
+    )
+    return fig
+
+
+def recommendation_chart(tasks: pd.DataFrame) -> go.Figure:
+    if tasks.empty:
+        return go.Figure()
+    counts = (
+        tasks["agent_recommendation"]
+        .value_counts()
+        .reindex(list(REC_COLORS.keys()))
+        .dropna()
+        .reset_index()
+    )
+    counts.columns = ["Khuyến nghị", "Số task"]
+    fig = px.bar(
+        counts,
+        y="Khuyến nghị",
+        x="Số task",
+        orientation="h",
+        color="Khuyến nghị",
+        color_discrete_map=REC_COLORS,
+        text="Số task",
+    )
+    fig.update_layout(
+        height=370,
+        margin=dict(l=10, r=10, t=35, b=10),
+        title="Phân bổ khuyến nghị AI Agent",
+        showlegend=False,
+        plot_bgcolor="#FBFAF7",
+        paper_bgcolor="#FBFAF7",
+    )
+    fig.update_traces(textposition="outside")
+    return fig
+
+
+def regression_chart(ols: pd.DataFrame, logit: pd.DataFrame) -> go.Figure:
+    fig = go.Figure()
+    if not ols.empty:
+        ols_plot = ols.sort_values("coef")
+        fig.add_trace(
+            go.Bar(
+                x=ols_plot["coef"],
+                y=ols_plot["variable_vi"],
+                orientation="h",
+                name="OLS: rủi ro chất lượng",
+                marker_color=[
+                    PALETTE["coral"] if v > 0 else PALETTE["teal"] for v in ols_plot["coef"]
+                ],
+                hovertemplate="%{y}<br>Hệ số: %{x:.3f}<extra></extra>",
+            )
+        )
+    if not logit.empty:
+        logit_plot = logit.sort_values("odds_ratio")
+        fig.add_trace(
+            go.Bar(
+                x=np.log(logit_plot["odds_ratio"].clip(lower=1e-6)),
+                y=logit_plot["variable_vi"],
+                orientation="h",
+                name="Logit: cần Copilot + review",
+                marker_color=PALETTE["gold"],
+                hovertemplate="%{y}<br>log(odds ratio): %{x:.2f}<extra></extra>",
+            )
+        )
+    fig.add_vline(x=0, line_color=PALETTE["ink"], line_width=1)
+    fig.update_layout(
+        barmode="group",
+        height=460,
+        margin=dict(l=10, r=10, t=35, b=10),
+        title="Hồi quy khám phá: tín hiệu nào liên quan đến quality gate?",
+        xaxis_title="Hệ số chuẩn hóa / log(odds ratio)",
+        yaxis_title="",
+        plot_bgcolor="#FBFAF7",
+        paper_bgcolor="#FBFAF7",
+        legend_title_text="Mô hình",
+    )
+    return fig
+
+
+def sigmoid(x: float) -> float:
+    return 1 / (1 + np.exp(-np.clip(x, -30, 30)))
+
+
+def build_regression_reference(tasks: pd.DataFrame, raw_tasks: pd.DataFrame) -> pd.DataFrame:
+    frames = []
+    if not raw_tasks.empty:
+        raw = raw_tasks.copy()
+        if "sector" in raw.columns:
+            raw = raw[raw["sector"].eq("Computer and Mathematical")]
+        frames.append(raw)
+    if not tasks.empty:
+        frames.append(tasks.copy())
+
+    reference = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    for col in REG_FEATURES + ["quality_risk_need"]:
+        if col in reference.columns:
+            reference[col] = pd.to_numeric(reference[col], errors="coerce")
+    if "quality_critical_task" in reference.columns:
+        reference["quality_critical_task"] = reference["quality_critical_task"].fillna(0).astype(float)
+    return reference
+
+
+def default_feature_value(reference: pd.DataFrame, feature: str) -> float:
+    if reference.empty or feature not in reference.columns:
+        if not reference.empty and {"variable", "mean"}.issubset(reference.columns):
+            row = reference[reference["variable"].eq(feature)]
+            if not row.empty and pd.notna(row["mean"].iloc[0]):
+                return float(row["mean"].iloc[0])
+        return 0.5
+    value = reference[feature].dropna().mean()
+    if pd.isna(value):
+        return 0.5
+    return float(value)
+
+
+def feature_std(reference: pd.DataFrame, feature: str) -> float:
+    if reference.empty or feature not in reference.columns:
+        if not reference.empty and {"variable", "std"}.issubset(reference.columns):
+            row = reference[reference["variable"].eq(feature)]
+            if not row.empty and pd.notna(row["std"].iloc[0]) and row["std"].iloc[0] != 0:
+                return float(row["std"].iloc[0])
+        return 1.0
+    std = reference[feature].dropna().std(ddof=0)
+    if pd.isna(std) or std == 0:
+        return 1.0
+    return float(std)
+
+
+def slider_bounds(reference: pd.DataFrame, feature: str) -> tuple[float, float, float]:
+    if feature == "quality_critical_task":
+        return 0.0, 1.0, 1.0
+    if not reference.empty and {"variable", "p02", "p98"}.issubset(reference.columns):
+        row = reference[reference["variable"].eq(feature)]
+        if not row.empty:
+            low = float(row["p02"].iloc[0])
+            high = float(row["p98"].iloc[0])
+            step = 0.05 if feature.startswith("expert_") else 0.01
+            if feature.startswith("expert_"):
+                return max(0.0, round(low, 2)), min(5.0, round(high, 2)), step
+            return max(0.0, round(low, 2)), min(1.0, round(high, 2)), step
+    if feature.startswith("expert_"):
+        values = reference[feature].dropna() if feature in reference.columns else pd.Series(dtype=float)
+        low = float(values.quantile(0.02)) if not values.empty else 1.0
+        high = float(values.quantile(0.98)) if not values.empty else 5.0
+        return max(0.0, round(low, 2)), min(5.0, round(high, 2)), 0.05
+    return 0.0, 1.0, 0.01
+
+
+def predict_from_regression(
+    values: dict[str, float],
+    reference: pd.DataFrame,
+    tasks: pd.DataFrame,
+    ols: pd.DataFrame,
+    logit: pd.DataFrame,
+) -> dict[str, object]:
+    z_values = {}
+    for feature in REG_FEATURES:
+        mean = default_feature_value(reference, feature)
+        std = feature_std(reference, feature)
+        z_values[feature] = (values.get(feature, mean) - mean) / std
+
+    ols_coef = dict(zip(ols.get("variable", []), ols.get("coef", [])))
+    logit_coef = dict(zip(logit.get("variable", []), logit.get("coef", [])))
+
+    if not reference.empty and "ols_intercept" in reference.columns and pd.notna(reference["ols_intercept"].iloc[0]):
+        baseline_risk = float(reference["ols_intercept"].iloc[0])
+    else:
+        baseline_risk = tasks["quality_risk_need"].dropna().mean()
+        if pd.isna(baseline_risk):
+            baseline_risk = 0.5
+    risk_linear = float(baseline_risk + sum(ols_coef.get(f, 0.0) * z_values[f] for f in REG_FEATURES))
+    risk_pred = float(np.clip(risk_linear, 0, 1))
+
+    if not reference.empty and "logit_intercept" in reference.columns and pd.notna(reference["logit_intercept"].iloc[0]):
+        logit_intercept = float(reference["logit_intercept"].iloc[0])
+    else:
+        review_rate = tasks["agent_recommendation"].eq("Copilot + review bắt buộc").mean()
+        review_rate = float(np.clip(review_rate if not pd.isna(review_rate) else 0.2, 0.01, 0.99))
+        logit_intercept = np.log(review_rate / (1 - review_rate))
+    review_logit = float(logit_intercept + sum(logit_coef.get(f, 0.0) * z_values[f] for f in REG_FEATURES))
+    review_prob = float(sigmoid(review_logit))
+
+    contributions = []
+    for feature in REG_FEATURES:
+        contributions.append(
+            {
+                "feature": feature,
+                "label": FEATURE_LABELS[feature],
+                "ols_contribution": ols_coef.get(feature, 0.0) * z_values[feature],
+                "logit_contribution": logit_coef.get(feature, 0.0) * z_values[feature],
+            }
+        )
+
+    if values.get("quality_critical_task", 0) >= 0.5 and (review_prob >= 0.35 or risk_pred >= 0.45):
+        recommendation = "Copilot + review bắt buộc"
+    elif review_prob >= 0.65:
+        recommendation = "Copilot + review bắt buộc"
+    elif risk_pred >= 0.62:
+        recommendation = "Con người dẫn dắt, AI hỗ trợ"
+    elif review_prob <= 0.25 and risk_pred <= 0.35 and values.get("quality_critical_task", 0) < 0.5:
+        recommendation = "Agent bán tự động"
+    else:
+        recommendation = "Thử nghiệm / theo dõi"
+
+    return {
+        "quality_risk_need": risk_pred,
+        "review_probability": review_prob,
+        "recommendation": recommendation,
+        "contributions": pd.DataFrame(contributions),
+    }
+
+
+def contribution_chart(contrib: pd.DataFrame, column: str, title_text: str) -> go.Figure:
+    if contrib.empty:
+        return go.Figure()
+    plot_df = contrib.copy()
+    plot_df["abs_value"] = plot_df[column].abs()
+    plot_df = plot_df.sort_values("abs_value", ascending=True).tail(7)
+    fig = px.bar(
+        plot_df,
+        x=column,
+        y="label",
+        orientation="h",
+        color=column,
+        color_continuous_scale=["#129C9A", "#E8EEF2", "#EF6F52"],
+        color_continuous_midpoint=0,
+        labels={column: "Đóng góp vào dự đoán", "label": ""},
+    )
+    fig.add_vline(x=0, line_color=PALETTE["ink"], line_width=1)
+    fig.update_layout(
+        height=360,
+        title=title_text,
+        margin=dict(l=10, r=10, t=45, b=10),
+        plot_bgcolor="#FBFAF7",
+        paper_bgcolor="#FBFAF7",
+        showlegend=False,
+        coloraxis_showscale=False,
+    )
+    return fig
+
+
+def regression_simulator(
+    tasks: pd.DataFrame,
+    raw_tasks: pd.DataFrame,
+    ols: pd.DataFrame,
+    logit: pd.DataFrame,
+    reg_ref: pd.DataFrame,
+) -> None:
+    reference = reg_ref if not reg_ref.empty else build_regression_reference(tasks, raw_tasks)
+    if reference.empty or ols.empty or logit.empty:
+        st.info("Chưa đủ dữ liệu để mô phỏng hồi quy.")
+        return
+
+    st.subheader("Kéo thả để xem dự đoán hồi quy thay đổi")
     st.markdown(
-        f"""
-        <div class="insight-card">
-            <strong>{title}</strong>
-            <p>{body}</p>
+        """
+        <div class="explain-box">
+        <b>Cách dùng:</b> kéo các thanh trượt để giả lập một task có mức tiếp xúc AI,
+        độ bất định, yêu cầu chuyên môn và mức cần con người khác nhau. Mô hình sẽ tính lại
+        hai kết quả: <b>rủi ro chất lượng dự đoán</b> và <b>xác suất cần Copilot + review bắt buộc</b>.
+        Khuyến nghị cuối kết hợp cả hai kết quả này với rule bảo thủ cho task critical.
+        Đây là mô phỏng khám phá, không phải chứng minh nhân quả.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-
-def language_for_path(path: str) -> str:
-    suffix = Path(path).suffix.lower()
-    return {
-        ".py": "python",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".ts": "typescript",
-        ".tsx": "typescript",
-        ".json": "json",
-        ".md": "markdown",
-        ".toml": "toml",
-        ".yaml": "yaml",
-        ".yml": "yaml",
-        ".sql": "sql",
-        ".css": "css",
-        ".html": "html",
-    }.get(suffix, "text")
-
-
-def default_demo_repo() -> dict[str, str]:
-    return {
-        "README.md": """# RepoPilot demo
-
-Repo mẫu cho giao diện Tool-based Code Agent.
-
-Mục tiêu:
-- Nạp source code thành tri thức có cấu trúc.
-- Agent đọc file, tìm symbol và trả lời kèm nguồn.
-- Mọi hành động rủi ro đi qua 4 thanh kiểm soát.
-""",
-        "src/auth/service.py": '''from src.database.user_repo import UserRepository
-
-
-class AuthService:
-    def __init__(self, users: UserRepository):
-        self.users = users
-
-    def login(self, email: str, password: str) -> dict:
-        user = self.users.find_by_email(email)
-        if not user:
-            raise ValueError("Invalid credentials")
-        if not self.users.verify_password(user, password):
-            raise ValueError("Invalid credentials")
-        return {"user_id": user.id, "role": user.role}
-''',
-        "src/auth/router.py": '''from fastapi import APIRouter
-from src.auth.service import AuthService
-
-router = APIRouter()
-
-
-@router.post("/login")
-def login(payload: dict, auth: AuthService):
-    return auth.login(payload["email"], payload["password"])
-''',
-        "src/database/user_repo.py": '''class UserRepository:
-    def find_by_email(self, email: str):
-        return None
-
-    def verify_password(self, user, password: str) -> bool:
-        return False
-''',
-        "tests/test_auth_login.py": '''from src.auth.service import AuthService
-
-
-def test_login_invalid_user(user_repo):
-    service = AuthService(user_repo)
-    try:
-        service.login("missing@example.com", "secret")
-    except ValueError:
-        assert True
-''',
-    }
-
-
-def parse_zip_repo(uploaded_file) -> tuple[dict[str, str], list[str]]:
-    files: dict[str, str] = {}
-    skipped: list[str] = []
-    ignored_parts = {
-        ".git",
-        ".venv",
-        "__pycache__",
-        "node_modules",
-        "dist",
-        "build",
-        ".next",
-        ".pytest_cache",
-    }
-    text_suffixes = {
-        ".py",
-        ".js",
-        ".jsx",
-        ".ts",
-        ".tsx",
-        ".json",
-        ".md",
-        ".txt",
-        ".toml",
-        ".yaml",
-        ".yml",
-        ".sql",
-        ".css",
-        ".html",
-    }
-
-    with zipfile.ZipFile(io.BytesIO(uploaded_file.getvalue())) as archive:
-        for info in archive.infolist():
-            path = Path(info.filename)
-            clean_name = "/".join(path.parts)
-            if info.is_dir():
-                continue
-            if any(part in ignored_parts for part in path.parts):
-                skipped.append(clean_name)
-                continue
-            if path.suffix.lower() not in text_suffixes:
-                skipped.append(clean_name)
-                continue
-            if info.file_size > 200_000:
-                skipped.append(clean_name)
-                continue
-
-            raw = archive.read(info.filename)
-            if b"\x00" in raw[:2048]:
-                skipped.append(clean_name)
-                continue
-            files[clean_name] = raw.decode("utf-8", errors="replace")
-
-    return dict(sorted(files.items())), skipped
-
-
-def find_symbols_for_content(path: str, content: str) -> list[dict[str, str | int]]:
-    symbols: list[dict[str, str | int]] = []
-    suffix = Path(path).suffix.lower()
-
-    if suffix == ".py":
-        pattern = re.compile(r"^\s*(def|class)\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
-    elif suffix in {".js", ".jsx", ".ts", ".tsx"}:
-        pattern = re.compile(
-            r"^\s*(function|class)\s+([A-Za-z_][A-Za-z0-9_]*)|"
-            r"^\s*const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?\(",
-            re.MULTILINE,
-        )
-    else:
-        return symbols
-
-    for match in pattern.finditer(content):
-        kind = match.group(1) or "function"
-        name = match.group(2) or match.group(3)
-        line = content[: match.start()].count("\n") + 1
-        symbols.append({"symbol": str(name), "type": str(kind), "file": path, "line": line})
-
-    return symbols
-
-
-def build_symbol_table(repo_files: dict[str, str]) -> pd.DataFrame:
-    rows: list[dict[str, str | int]] = []
-    for path, content in repo_files.items():
-        rows.extend(find_symbols_for_content(path, content))
-    if not rows:
-        return pd.DataFrame(columns=["symbol", "type", "file", "line"])
-    return pd.DataFrame(rows).sort_values(["file", "line"]).reset_index(drop=True)
-
-
-def control_summary(strictness: int, action_risk: int, human_review: int, autonomy: int) -> str:
-    strict_text = (
-        "chỉ kết luận từ file đã đọc"
-        if strictness >= 71
-        else "ưu tiên repo nhưng cho phép suy luận nền nhẹ"
-        if strictness >= 31
-        else "có thể giải thích thêm kiến thức nền ngoài repo"
-    )
-    risk_text = (
-        "chỉ đọc và giải thích"
-        if action_risk <= 30
-        else "được đề xuất hướng sửa"
-        if action_risk <= 70
-        else "có thể tạo patch hoặc chạy kiểm tra khi được duyệt"
-    )
-    review_text = (
-        "hỏi trước mọi hành động rủi ro"
-        if human_review >= 71
-        else "hỏi trước khi tạo patch"
-        if human_review >= 31
-        else "trả lời trực tiếp với cảnh báo phù hợp"
-    )
-    autonomy_text = (
-        "tự lập plan và đọc nhiều file liên quan"
-        if autonomy >= 71
-        else "đọc thêm file phụ thuộc trực tiếp"
-        if autonomy >= 31
-        else "chỉ xử lý đúng câu hỏi"
-    )
-    return (
-        f"Agent hiện {strict_text}; quyền hành động là {risk_text}; "
-        f"chế độ review sẽ {review_text}; mức tự chủ cho phép {autonomy_text}."
-    )
-
-
-def allowed_tools(action_risk: int, human_review: int) -> pd.DataFrame:
-    rows = [
-        ("list_files", "Thấp", "Luôn cho phép"),
-        ("read_file", "Thấp", "Chỉ đọc file trong repo đã nạp"),
-        ("search_code", "Thấp", "Dùng cho tìm literal, không quét secrets"),
-        ("find_symbol", "Thấp", "Dùng bảng symbol đã index"),
-    ]
-    if action_risk >= 31:
-        rows.extend(
+    controls, results = st.columns([1, 1.25])
+    values = {}
+    with controls:
+        preset = st.selectbox(
+            "Chọn tình huống mẫu",
             [
-                ("find_references", "Trung bình", "Cho phép khi repo đã index"),
-                ("get_dependency_graph", "Trung bình", "Cho phép xem quan hệ file/symbol"),
-                ("suggest_fix", "Trung bình", "Chỉ đề xuất, chưa sửa file"),
-            ]
-        )
-    if action_risk >= 61:
-        review = "Cần người duyệt trước khi apply" if human_review >= 31 else "Chỉ tạo diff preview"
-        rows.append(("create_patch", "Cao", review))
-    if action_risk >= 81:
-        review = "Cần xác nhận trước khi chạy" if human_review >= 71 else "Cho phép chạy lệnh test giới hạn"
-        rows.append(("run_tests", "Cao", review))
-    return pd.DataFrame(rows, columns=["Tool", "Rủi ro", "Điều kiện"])
-
-
-def get_ai_settings() -> dict[str, str | bool | None]:
-    if os.getenv("AGENT_DISABLE_AI", "").strip() == "1":
-        return {
-            "configured": False,
-            "provider": "Disabled",
-            "api_key": "",
-            "base_url": None,
-            "model": None,
-        }
-
-    dashscope_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
-    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
-    api_key = dashscope_key or openai_key
-    provider = "DashScope" if dashscope_key else "OpenAI-compatible"
-    model = (
-        os.getenv("DASHSCOPE_MODEL", "").strip()
-        or os.getenv("OPENAI_MODEL", "").strip()
-        or ("qwen-plus" if dashscope_key else "gpt-4o-mini")
-    )
-    base_url = os.getenv("DASHSCOPE_BASE_URL", "").strip() or os.getenv("OPENAI_BASE_URL", "").strip() or None
-    return {
-        "configured": bool(api_key and model),
-        "provider": provider,
-        "api_key": api_key,
-        "base_url": base_url,
-        "model": model,
-    }
-
-
-def truncate_text(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 80].rstrip() + "\n\n[Đã rút gọn vì file/context quá dài]"
-
-
-def build_repo_context(
-    repo_files: dict[str, str],
-    symbol_table: pd.DataFrame,
-    selected_file: str,
-    question: str,
-    max_chars: int = 14_000,
-) -> str:
-    file_list = "\n".join(f"- {path}" for path in list(repo_files)[:80])
-    if len(repo_files) > 80:
-        file_list += f"\n- ... còn {len(repo_files) - 80} file khác"
-
-    symbol_view = "Chưa có symbol."
-    if not symbol_table.empty:
-        symbol_view = symbol_table.head(80).to_csv(index=False)
-
-    query_terms = [part for part in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", question) if len(part) >= 3]
-    related_paths = [selected_file]
-    for path, content in repo_files.items():
-        if path == selected_file:
-            continue
-        if any(re.search(rf"\b{re.escape(term)}\b", content, flags=re.IGNORECASE) for term in query_terms):
-            related_paths.append(path)
-        if len(related_paths) >= 5:
-            break
-
-    sections = [
-        "FILE LIST:",
-        file_list,
-        "\nSYMBOL TABLE:",
-        symbol_view,
-    ]
-    for path in related_paths:
-        sections.extend(
-            [
-                f"\nFILE: {path}",
-                "```",
-                truncate_text(repo_files[path], 3_500),
-                "```",
-            ]
-        )
-
-    return truncate_text("\n".join(sections), max_chars)
-
-
-def ask_configured_ai(
-    repo_files: dict[str, str],
-    symbol_table: pd.DataFrame,
-    selected_file: str,
-    question: str,
-    strictness: int,
-    action_risk: int,
-    human_review: int,
-    autonomy: int,
-) -> tuple[str, pd.DataFrame, str]:
-    fallback_answer, trace = analyze_agent_question(repo_files, symbol_table, selected_file, question)
-    settings = get_ai_settings()
-
-    if not settings["configured"]:
-        trace.loc[len(trace)] = ("llm_completion", "Chưa cấu hình API key/model", "Dùng fallback")
-        return fallback_answer, trace, "fallback"
-
-    repo_context = build_repo_context(repo_files, symbol_table, selected_file, question)
-    system_prompt = (
-        "Bạn là Code Agent làm việc trên repository đã import. "
-        "Chỉ kết luận dựa trên repo context được cung cấp; nếu thiếu bằng chứng thì nói rõ. "
-        "Luôn trả lời bằng tiếng Việt, dễ hiểu, có file/dòng hoặc symbol khi có thể. "
-        "Không tự nhận đã chạy test, tạo patch, hay đọc file ngoài context. "
-        "Nếu hành động rủi ro cao, hãy nói cần human review."
-    )
-    user_prompt = f"""
-Câu hỏi của người dùng:
-{question}
-
-File đang mở:
-{selected_file}
-
-Thanh kiểm soát:
-- GitHub Strictness: {strictness}/100
-- Action Risk: {action_risk}/100
-- Human Review: {human_review}/100
-- Autonomy: {autonomy}/100
-
-Repo context đã index:
-{repo_context}
-
-Hãy trả lời như một AI Agent trong IDE: nêu kết luận chính trước, sau đó nêu bằng chứng file/symbol, cuối cùng nêu bước tiếp theo phù hợp với thanh kiểm soát.
-"""
-
-    try:
-        client_kwargs = {"api_key": str(settings["api_key"])}
-        if settings["base_url"]:
-            client_kwargs["base_url"] = str(settings["base_url"])
-        client_kwargs["timeout"] = 20.0
-        client = OpenAI(**client_kwargs)
-        response = client.chat.completions.create(
-            model=str(settings["model"]),
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                "Tự điều chỉnh",
+                "Task sinh code đơn giản",
+                "Task review/debug critical",
+                "Task kiến trúc/bảo mật rủi ro cao",
             ],
-            temperature=0.2,
-            max_tokens=900,
+            help="Preset chỉ đặt nhanh giá trị slider; bạn vẫn có thể kéo lại từng biến.",
         )
-        content = response.choices[0].message.content or ""
-        answer = content.strip() or fallback_answer
-        trace.loc[len(trace)] = ("llm_completion", f"{settings['provider']} / {settings['model']}", "Hoàn tất")
-        return answer, trace, "ai"
-    except Exception as exc:
-        trace.loc[len(trace)] = ("llm_completion", f"{settings['provider']} / {settings['model']}", "Lỗi, dùng fallback")
-        answer = (
-            f"Không gọi được AI thật ({exc.__class__.__name__}), nên app tạm dùng phân tích local.\n\n"
-            f"{fallback_answer}"
-        )
-        return answer, trace, "fallback"
+        presets = {
+            "Task sinh code đơn giản": {
+                "automation_exposure_index": 0.85,
+                "worker_pull_index": 0.65,
+                "human_complementarity_index": 0.25,
+                "innovation_momentum_index": 0.85,
+                "expert_uncertainty_requirement": 2.0,
+                "expert_domain_expertise_requirement": 2.3,
+                "quality_critical_task": 0.0,
+            },
+            "Task review/debug critical": {
+                "automation_exposure_index": 0.80,
+                "worker_pull_index": 0.65,
+                "human_complementarity_index": 0.75,
+                "innovation_momentum_index": 0.80,
+                "expert_uncertainty_requirement": 4.0,
+                "expert_domain_expertise_requirement": 3.8,
+                "quality_critical_task": 1.0,
+            },
+            "Task kiến trúc/bảo mật rủi ro cao": {
+                "automation_exposure_index": 0.82,
+                "worker_pull_index": 0.60,
+                "human_complementarity_index": 0.85,
+                "innovation_momentum_index": 0.75,
+                "expert_uncertainty_requirement": 4.4,
+                "expert_domain_expertise_requirement": 4.5,
+                "quality_critical_task": 1.0,
+            },
+        }
+        preset_values = presets.get(preset, {})
 
+        for feature in REG_FEATURES:
+            low, high, step = slider_bounds(reference, feature)
+            default = preset_values.get(feature, default_feature_value(reference, feature))
+            default = float(np.clip(default, low, high))
+            if feature == "quality_critical_task":
+                values[feature] = 1.0 if st.toggle(
+                    FEATURE_LABELS[feature],
+                    value=bool(round(default)),
+                    help="Bật nếu task liên quan QA, security, troubleshooting, backup, production hoặc compliance.",
+                ) else 0.0
+            else:
+                values[feature] = st.slider(
+                    FEATURE_LABELS[feature],
+                    min_value=float(low),
+                    max_value=float(high),
+                    value=float(default),
+                    step=float(step),
+                    help="Kéo sang phải nghĩa là tín hiệu này mạnh hơn.",
+                )
 
-def analyze_agent_question(
-    repo_files: dict[str, str],
-    symbol_table: pd.DataFrame,
-    selected_file: str,
-    question: str,
-) -> tuple[str, pd.DataFrame]:
-    query = question.strip() or "Phân tích repo hiện tại"
-    lower_query = query.lower()
+    prediction = predict_from_regression(values, reference, tasks, ols, logit)
+    risk = prediction["quality_risk_need"]
+    review_prob = prediction["review_probability"]
+    rec = prediction["recommendation"]
 
-    matched_symbol = None
-    if not symbol_table.empty:
-        for symbol in symbol_table["symbol"].astype(str).sort_values(key=lambda s: s.str.len(), ascending=False):
-            if re.search(rf"\b{re.escape(symbol.lower())}\b", lower_query):
-                matched_symbol = symbol
-                break
+    with results:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Rủi ro chất lượng dự đoán", score(risk))
+        m2.metric("Xác suất cần review", pct(review_prob))
+        m3.metric("Khuyến nghị", rec)
 
-    if matched_symbol is None and "login" in lower_query:
-        matched_symbol = "login"
-
-    trace_rows = [
-        ("list_files", "Đọc cây repo và đếm file", "Hoàn tất"),
-        ("read_file", selected_file, "Hoàn tất"),
-    ]
-
-    if matched_symbol:
-        trace_rows.append(("find_symbol", matched_symbol, "Hoàn tất"))
-        symbol_hits = (
-            symbol_table[symbol_table["symbol"].astype(str).str.lower() == matched_symbol.lower()]
-            if not symbol_table.empty
-            else pd.DataFrame()
-        )
-        reference_hits = [
-            path for path, content in repo_files.items() if re.search(rf"\b{re.escape(matched_symbol)}\b", content)
-        ]
-        trace_rows.append(("find_references", matched_symbol, "Hoàn tất"))
-
-        if not symbol_hits.empty:
-            lead = symbol_hits.iloc[0]
-            ref_text = ", ".join(reference_hits[:6]) if reference_hits else "chưa thấy file khác gọi hoặc nhắc tới symbol này"
-            conclusion = (
-                f"Agent tìm thấy `{matched_symbol}` tại `{lead['file']}`, dòng {lead['line']}. "
-                f"Các file có liên quan trực tiếp: {ref_text}. "
-                "Nếu sửa phần này, nên kiểm tra route/caller, lớp repository hoặc service liên quan, rồi chạy test gần nhất trước khi tạo patch."
+        gauge = go.Figure()
+        gauge.add_trace(
+            go.Indicator(
+                mode="gauge+number",
+                value=review_prob * 100,
+                number={"suffix": "%"},
+                title={"text": "Xác suất cần Copilot + review"},
+                gauge={
+                    "axis": {"range": [0, 100]},
+                    "bar": {"color": REC_COLORS.get(rec, PALETTE["coral"])},
+                    "steps": [
+                        {"range": [0, 30], "color": "#E8F3F1"},
+                        {"range": [30, 60], "color": "#FFF3D4"},
+                        {"range": [60, 100], "color": "#FFE1D9"},
+                    ],
+                    "threshold": {"line": {"color": PALETTE["ink"], "width": 3}, "value": review_prob * 100},
+                },
             )
+        )
+        gauge.update_layout(height=285, margin=dict(l=10, r=10, t=40, b=10), paper_bgcolor="#FBFAF7")
+        st.plotly_chart(gauge, width="stretch")
+
+        st.caption(
+            "Lưu ý: xác suất Logit nhạy nhất với mức tiếp xúc AI, worker muốn AI và động lực đổi mới; "
+            "rủi ro chất lượng OLS nhạy hơn với mức cần con người, độ bất định và chuyên môn miền."
+        )
+
+        if rec == "Agent bán tự động":
+            st.success("Diễn giải: task này có thể thử tự động hóa có kiểm soát, nhưng vẫn nên có logging, test và rollback.")
+        elif rec == "Copilot + review bắt buộc":
+            st.warning("Diễn giải: AI có thể giúp tăng tốc, nhưng output cần review/test trước khi dùng thật.")
+        elif rec == "Con người dẫn dắt, AI hỗ trợ":
+            st.info("Diễn giải: con người nên giữ vai trò quyết định; AI phù hợp để gợi ý, tóm tắt hoặc tạo nháp.")
         else:
-            conclusion = (
-                f"Agent chưa thấy symbol `{matched_symbol}` trong bảng symbol, nhưng đã dùng `search_code` kiểu literal để tìm trong repo. "
-                f"File có nhắc tới từ khóa này: {', '.join(reference_hits[:6]) if reference_hits else 'chưa có file nào'}."
-            )
-    else:
-        selected_symbols = (
-            symbol_table[symbol_table["file"] == selected_file]["symbol"].astype(str).tolist()
-            if not symbol_table.empty
-            else []
+            st.info("Diễn giải: nên thí điểm nhỏ, đo lỗi và thu thêm dữ liệu trước khi mở rộng.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.plotly_chart(
+            contribution_chart(
+                prediction["contributions"],
+                "ols_contribution",
+                "Yếu tố làm thay đổi rủi ro chất lượng",
+            ),
+            width="stretch",
         )
-        trace_rows.append(("extract_outline", selected_file, "Hoàn tất"))
-        if selected_symbols:
-            conclusion = (
-                f"Agent đã đọc `{selected_file}` và phát hiện các symbol chính: {', '.join(selected_symbols[:8])}. "
-                "Hãy hỏi cụ thể tên hàm/class nếu muốn phân tích ảnh hưởng hoặc nơi được gọi."
-            )
-        else:
-            conclusion = (
-                f"Agent đã đọc `{selected_file}` nhưng chưa phát hiện function/class rõ ràng. "
-                "Có thể đây là file tài liệu, cấu hình, hoặc ngôn ngữ chưa có parser trong prototype."
-            )
-
-    trace = pd.DataFrame(trace_rows, columns=["Tool", "Input", "Trạng thái"])
-    return conclusion, trace
+    with c2:
+        st.plotly_chart(
+            contribution_chart(
+                prediction["contributions"],
+                "logit_contribution",
+                "Yếu tố làm thay đổi xác suất cần review",
+            ),
+            width="stretch",
+        )
 
 
-def render_code_agent_mode() -> None:
-    st.title("Tool-based Code Agent IDE")
-    st.caption(
-        "Prototype giao diện giống VS Code: nạp source code làm tri thức, Agent đọc repo bằng tool, "
-        "và 4 thanh kiểm soát quyết định mức tự chủ."
+def reskill_occ_chart(df: pd.DataFrame, top_n: int = 12) -> go.Figure:
+    if df.empty:
+        return go.Figure()
+    plot_df = df.sort_values("reskilling_priority_score", ascending=False).head(top_n)
+    fig = px.bar(
+        plot_df.sort_values("reskilling_priority_score"),
+        x="reskilling_priority_score",
+        y="Occupation (O*NET-SOC Title)",
+        orientation="h",
+        color="critical_task_share",
+        color_continuous_scale=["#E8EEF2", PALETTE["coral"]],
+        labels={
+            "reskilling_priority_score": "Điểm ưu tiên reskilling",
+            "Occupation (O*NET-SOC Title)": "",
+            "critical_task_share": "Tỉ lệ task critical",
+        },
+        hover_data={
+            "task_count": True,
+            "code_acceleration_potential": ":.2f",
+            "quality_risk_need": ":.2f",
+            "human_complementarity_index": ":.2f",
+        },
     )
+    fig.update_layout(
+        height=500,
+        margin=dict(l=10, r=10, t=35, b=10),
+        title="Nghề nên ưu tiên đào tạo lại",
+        plot_bgcolor="#FBFAF7",
+        paper_bgcolor="#FBFAF7",
+    )
+    return fig
+
+
+def reskill_group_chart(df: pd.DataFrame) -> go.Figure:
+    if df.empty:
+        return go.Figure()
+    plot_df = df.sort_values("reskilling_priority_score")
+    fig = px.bar(
+        plot_df,
+        x="reskilling_priority_score",
+        y="task_group_vi",
+        orientation="h",
+        color="critical_task_share",
+        color_continuous_scale=["#E8EEF2", PALETTE["teal"], PALETTE["coral"]],
+        labels={
+            "reskilling_priority_score": "Điểm ưu tiên reskilling",
+            "task_group_vi": "",
+            "critical_task_share": "Tỉ lệ task critical",
+        },
+        hover_data={"task_count": True, "quality_risk_need": ":.2f"},
+    )
+    fig.update_layout(
+        height=430,
+        margin=dict(l=10, r=10, t=35, b=10),
+        title="Nhóm task cần nâng cấp kỹ năng",
+        plot_bgcolor="#FBFAF7",
+        paper_bgcolor="#FBFAF7",
+    )
+    return fig
+
+
+def pathway_view(pathway: pd.DataFrame) -> None:
+    if pathway.empty:
+        st.info("Chưa có bảng pathway.")
+        return
 
     st.markdown(
         """
-        <div class="agent-shell">
-            <span class="agent-status">Ready for prototype</span>
-            <div class="agent-title">Mục tiêu trải nghiệm</div>
-            <div class="agent-muted">
-                Người dùng không chỉ chat với AI. Họ nhìn thấy file nào được đọc, symbol nào được tìm,
-                tool nào được gọi và quyền hành động nào đang bị chặn bởi thanh kiểm soát.
-            </div>
+        <div class="explain-box">
+        <b>Cách đọc:</b> AI không làm câu chuyện chuyển từ "biết code" sang "không cần code".
+        Dữ liệu gợi ý hướng dịch chuyển hợp lý hơn là từ tự tạo output sang kiểm soát output:
+        biết đặt yêu cầu, kiểm chứng, review, test, đánh giá trade-off và chịu trách nhiệm chất lượng.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    import_col, status_col = st.columns([1.35, 0.9])
-    with import_col:
-        st.subheader("Nạp source code làm tri thức")
-        github_url = st.text_input(
-            "GitHub public URL",
-            placeholder="https://github.com/org/repo",
-            help="Trong prototype Streamlit này, URL được ghi nhận để mô phỏng luồng clone. ZIP upload sẽ được đọc thật.",
+    for _, row in pathway.iterrows():
+        cols = st.columns([1, 1, 1.25])
+        cols[0].markdown(
+            f"""
+            <div class="path-card">
+            <div class="path-title">Trước AI</div>
+            {row['before_ai']}
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-        uploaded_zip = st.file_uploader("Upload ZIP source code", type=["zip"])
-    with status_col:
-        st.subheader("Trạng thái index")
+        cols[1].markdown(
+            f"""
+            <div class="path-card">
+            <div class="path-title">Khi có AI hỗ trợ</div>
+            {row['ai_augmented_work']}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        cols[2].markdown(
+            f"""
+            <div class="path-card">
+            <div class="path-title">Kỹ năng cần nâng cấp</div>
+            {row['human_premium_skill']}
+            <div class="small-note">Nhóm task: {row['related_task_group']}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def extract_known_skills(raw_tasks: pd.DataFrame) -> list[str]:
+    if raw_tasks.empty or "skill_list" not in raw_tasks.columns:
+        return []
+    skills: set[str] = set()
+    for value in raw_tasks["skill_list"].dropna().astype(str):
+        cleaned = value.strip()
+        if cleaned.startswith("[") and cleaned.endswith("]"):
+            cleaned = cleaned.strip("[]")
+            parts = [p.strip().strip("'\"") for p in cleaned.split(",")]
+        else:
+            parts = [cleaned]
+        for part in parts:
+            if part and part.lower() != "nan":
+                skills.add(part)
+    return sorted(skills)
+
+
+EXCLUDED_REPO_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "env",
+    "node_modules",
+    "__pycache__",
+    ".next",
+    "dist",
+    "build",
+    "target",
+    ".idea",
+    ".vscode",
+}
+
+LANGUAGE_BY_SUFFIX = {
+    ".py": "Python",
+    ".js": "JavaScript",
+    ".jsx": "React JSX",
+    ".ts": "TypeScript",
+    ".tsx": "React TypeScript",
+    ".java": "Java",
+    ".go": "Go",
+    ".rs": "Rust",
+    ".cs": "C#",
+    ".php": "PHP",
+    ".rb": "Ruby",
+    ".swift": "Swift",
+    ".kt": "Kotlin",
+}
+
+CODE_SUFFIXES = {
+    ".py",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".java",
+    ".go",
+    ".rs",
+    ".cs",
+    ".php",
+    ".rb",
+    ".swift",
+    ".kt",
+}
+
+
+def split_skills(text: str) -> list[str]:
+    return [skill.strip() for chunk in text.splitlines() for skill in chunk.split(",") if skill.strip()]
+
+
+def safe_extract_zip(zip_bytes: bytes, original_name: str) -> Path:
+    digest = hashlib.sha256(zip_bytes).hexdigest()[:12]
+    target_dir = OUTPUT_DIR / "uploaded_repos" / digest
+    target_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = target_dir / original_name
+    if not zip_path.exists():
+        zip_path.write_bytes(zip_bytes)
+    extract_dir = target_dir / "repo"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(zip_path) as archive:
+        for member in archive.infolist():
+            member_path = extract_dir / member.filename
+            resolved = member_path.resolve()
+            if not str(resolved).startswith(str(extract_dir.resolve())):
+                continue
+            if member.is_dir():
+                resolved.mkdir(parents=True, exist_ok=True)
+            else:
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                if not resolved.exists():
+                    with archive.open(member) as src, resolved.open("wb") as dst:
+                        dst.write(src.read())
+
+    children = [p for p in extract_dir.iterdir() if p.is_dir()]
+    files = [p for p in extract_dir.iterdir() if p.is_file()]
+    if len(children) == 1 and not files:
+        return children[0]
+    return extract_dir
+
+
+def scan_repository(repo_text: str) -> dict:
+    repo_path = Path(repo_text.strip().strip('"')).expanduser() if repo_text.strip() else BASE_DIR
+    result = {
+        "path": repo_path,
+        "exists": repo_path.exists() and repo_path.is_dir(),
+        "file_count": 0,
+        "languages": {},
+        "configs": [],
+        "top_dirs": [],
+        "frameworks": [],
+        "scripts": {},
+        "test_commands": [],
+        "lint_commands": [],
+        "build_commands": [],
+        "style_signals": [],
+    }
+    if not result["exists"]:
+        return result
+
+    suffix_counts: dict[str, int] = {}
+    top_dirs: set[str] = set()
+    files: list[Path] = []
+    for root, dirs, filenames in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if d not in EXCLUDED_REPO_DIRS and not d.startswith(".cache")]
+        rel_root = Path(root).relative_to(repo_path)
+        if rel_root.parts:
+            top_dirs.add(rel_root.parts[0])
+        for filename in filenames:
+            path = Path(root) / filename
+            files.append(path)
+            suffix = path.suffix.lower()
+            if suffix:
+                suffix_counts[suffix] = suffix_counts.get(suffix, 0) + 1
+        if len(files) >= 1500:
+            break
+
+    result["file_count"] = len(files)
+    result["top_dirs"] = sorted(top_dirs)[:18]
+    result["languages"] = {
+        LANGUAGE_BY_SUFFIX.get(suffix, suffix): count
+        for suffix, count in sorted(suffix_counts.items(), key=lambda item: item[1], reverse=True)[:8]
+    }
+
+    config_names = {
+        "package.json",
+        "pyproject.toml",
+        "requirements.txt",
+        "setup.py",
+        "tsconfig.json",
+        "vite.config.ts",
+        "next.config.js",
+        "next.config.mjs",
+        "tailwind.config.js",
+        "tailwind.config.ts",
+        "pytest.ini",
+        "ruff.toml",
+        ".eslintrc",
+        ".eslintrc.json",
+        "eslint.config.js",
+        "vitest.config.ts",
+        "jest.config.js",
+        "Dockerfile",
+    }
+    result["configs"] = sorted({path.name for path in files if path.name in config_names})
+
+    package_path = repo_path / "package.json"
+    if package_path.exists():
+        try:
+            package_data = json.loads(package_path.read_text(encoding="utf-8"))
+            deps = {**package_data.get("dependencies", {}), **package_data.get("devDependencies", {})}
+            scripts = package_data.get("scripts", {})
+            result["scripts"] = scripts
+            if "react" in deps:
+                result["frameworks"].append("React")
+            if "next" in deps:
+                result["frameworks"].append("Next.js")
+            if "vue" in deps:
+                result["frameworks"].append("Vue")
+            if "express" in deps:
+                result["frameworks"].append("Express")
+            if "zustand" in deps:
+                result["style_signals"].append("State management có dấu hiệu dùng Zustand.")
+            if "tailwindcss" in deps:
+                result["style_signals"].append("CSS có dấu hiệu dùng Tailwind.")
+            if "typescript" in deps or (repo_path / "tsconfig.json").exists():
+                result["frameworks"].append("TypeScript")
+                result["style_signals"].append("Có TypeScript, nên ưu tiên type rõ ràng và không bỏ qua lỗi type.")
+            for name, command in scripts.items():
+                lowered = name.lower()
+                if "test" in lowered:
+                    result["test_commands"].append(f"npm run {name}")
+                if "lint" in lowered:
+                    result["lint_commands"].append(f"npm run {name}")
+                if "build" in lowered:
+                    result["build_commands"].append(f"npm run {name}")
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            result["style_signals"].append("Có package.json nhưng chưa đọc được nội dung.")
+
+    pyproject_path = repo_path / "pyproject.toml"
+    requirements_path = repo_path / "requirements.txt"
+    if pyproject_path.exists() or requirements_path.exists():
+        result["frameworks"].append("Python")
+        py_text = ""
+        for path in [pyproject_path, requirements_path]:
+            if path.exists():
+                try:
+                    py_text += "\n" + path.read_text(encoding="utf-8", errors="ignore").lower()
+                except OSError:
+                    pass
+        if "fastapi" in py_text:
+            result["frameworks"].append("FastAPI")
+        if "django" in py_text:
+            result["frameworks"].append("Django")
+        if "pytest" in py_text or (repo_path / "pytest.ini").exists():
+            result["test_commands"].append("pytest")
+        if "ruff" in py_text or (repo_path / "ruff.toml").exists():
+            result["lint_commands"].append("ruff check .")
+        if "mypy" in py_text:
+            result["lint_commands"].append("mypy .")
+
+    if any(name in result["top_dirs"] for name in ["src", "app", "components"]):
+        result["style_signals"].append("Code chính có vẻ được tách theo thư mục src/app/components.")
+    if any("test" in name.lower() for name in result["top_dirs"]) or any(path.name.endswith((".test.ts", ".test.tsx", "_test.py")) for path in files[:500]):
+        result["style_signals"].append("Có cấu trúc test trong repo, AI phải thêm/sửa test cùng thay đổi logic.")
+
+    result["frameworks"] = sorted(set(result["frameworks"])) or ["Chưa nhận diện rõ"]
+    result["test_commands"] = sorted(set(result["test_commands"])) or ["Chưa phát hiện, cần hỏi người dùng"]
+    result["lint_commands"] = sorted(set(result["lint_commands"])) or ["Chưa phát hiện, cần hỏi người dùng"]
+    result["build_commands"] = sorted(set(result["build_commands"])) or ["Chưa phát hiện, cần hỏi người dùng"]
+    result["style_signals"] = result["style_signals"] or ["Chưa đủ tín hiệu; cần đọc thêm code mẫu trước khi sinh code."]
+    return result
+
+
+def iter_code_files(repo_path: Path, limit: int = 160) -> list[Path]:
+    if not repo_path.exists() or not repo_path.is_dir():
+        return []
+    files: list[Path] = []
+    for root, dirs, filenames in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if d not in EXCLUDED_REPO_DIRS and not d.startswith(".cache")]
+        for filename in filenames:
+            path = Path(root) / filename
+            if path.suffix.lower() in CODE_SUFFIXES and path.stat().st_size <= 240_000:
+                files.append(path)
+        if len(files) >= limit:
+            break
+    return files[:limit]
+
+
+def read_repo_text(path: Path, max_chars: int = 80_000) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")[:max_chars]
+    except OSError:
+        return ""
+
+
+def infer_coding_style_profile(repo_path: Path, repo_profile: dict) -> list[str]:
+    files = iter_code_files(repo_path, limit=120)
+    samples = "\n".join(read_repo_text(path, max_chars=12_000) for path in files[:80])
+    signals = list(repo_profile.get("style_signals", []))
+
+    tsconfig_path = repo_path / "tsconfig.json"
+    if tsconfig_path.exists():
+        tsconfig = read_repo_text(tsconfig_path, max_chars=20_000).lower()
+        if '"strict": true' in tsconfig or '"strict":true' in tsconfig:
+            signals.append("Dùng TypeScript strict.")
+
+    if re.search(r"export\s+(function|const)\s+[A-Z][A-Za-z0-9_]*", samples):
+        signals.append("Component có xu hướng dùng named export.")
+    if re.search(r"function\s+[A-Z][A-Za-z0-9_]*\s*\(|const\s+[A-Z][A-Za-z0-9_]*\s*=", samples):
+        signals.append("Component đặt tên PascalCase.")
+    if re.search(r"\buse[A-Z][A-Za-z0-9_]*\s*\(", samples):
+        signals.append("Hook đặt tên theo pattern useSomething.")
+    if "Promise<" in samples or re.search(r"async\s+function|async\s*\(", samples):
+        signals.append("API/helper bất đồng bộ nên giữ kiểu trả về async/Promise.")
+    if "try {" in samples and "catch" in samples:
+        signals.append("Error thường được xử lý bằng try/catch.")
+    if "toast.error" in samples or "toast(" in samples:
+        signals.append("Thông báo lỗi có dấu hiệu dùng toast.")
+    if "className=" in samples and any(token in samples for token in ["flex ", "grid ", "text-", "bg-", "rounded-"]):
+        signals.append("UI có dấu hiệu dùng Tailwind/class utility.")
+    if not re.search(r"class\s+[A-Z][A-Za-z0-9_]*\s+extends\s+React", samples):
+        signals.append("Không thấy class component React nổi bật; ưu tiên functional component nếu là React.")
+    if any(path.name.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx", "_test.py", "test.py")) for path in files):
+        signals.append("Có test trong repo; AI nên thêm/sửa test cùng thay đổi logic.")
+    if re.search(r"from\s+\.[\w.]+\s+import|import\s+{[^}]+}\s+from", samples):
+        signals.append("Cần giữ convention import/export hiện có thay vì tạo đường dẫn mới tùy tiện.")
+
+    deduped: list[str] = []
+    for signal in signals:
+        if signal and signal not in deduped:
+            deduped.append(signal)
+    return deduped[:10] or ["Chưa đủ code mẫu để rút style; cần retrieve thêm file liên quan."]
+
+
+def split_code_chunks(path: Path, repo_path: Path, text: str) -> list[dict]:
+    rel = path.relative_to(repo_path).as_posix()
+    pattern = re.compile(
+        r"(?m)^(?:export\s+)?(?:async\s+)?(?:function|class|interface|type)\s+([A-Za-z_][\w]*)|"
+        r"(?m)^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_][\w]*)\s*="
+    )
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return [{"path": rel, "symbol": path.stem, "kind": "file", "content": text[:4200]}]
+
+    chunks: list[dict] = []
+    for idx, match in enumerate(matches[:18]):
+        start = match.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else min(len(text), start + 5200)
+        symbol = match.group(1) or match.group(2) or path.stem
+        chunks.append(
+            {
+                "path": rel,
+                "symbol": symbol,
+                "kind": "symbol",
+                "content": text[start:end][:4200],
+            }
+        )
+    return chunks
+
+
+def build_code_index(repo_path: Path) -> list[dict]:
+    chunks: list[dict] = []
+    for path in iter_code_files(repo_path, limit=140):
+        text = read_repo_text(path, max_chars=70_000)
+        if text.strip():
+            chunks.extend(split_code_chunks(path, repo_path, text))
+        if len(chunks) >= 500:
+            break
+    return chunks[:500]
+
+
+def tokenize_for_search(text: str) -> set[str]:
+    return {token.lower() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)}
+
+
+def retrieve_relevant_chunks(chunks: list[dict], query: str, top_k: int = 5) -> list[dict]:
+    query_terms = tokenize_for_search(query)
+    if not query_terms:
+        return chunks[:top_k]
+    scored: list[tuple[float, dict]] = []
+    for chunk in chunks:
+        path_terms = tokenize_for_search(chunk["path"].replace("/", " "))
+        symbol_terms = tokenize_for_search(chunk["symbol"])
+        content_terms = tokenize_for_search(chunk["content"][:3000])
+        score_value = (
+            3.0 * len(query_terms & path_terms)
+            + 2.5 * len(query_terms & symbol_terms)
+            + 1.0 * len(query_terms & content_terms)
+        )
+        if score_value:
+            scored.append((score_value, chunk))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [chunk for _, chunk in scored[:top_k]] or chunks[:top_k]
+
+
+def runnable_validation_commands(repo_profile: dict) -> list[str]:
+    commands: list[str] = []
+    for key in ["test_commands", "lint_commands", "build_commands"]:
+        for command in repo_profile.get(key, []):
+            if command and "Chưa phát hiện" not in command and command not in commands:
+                commands.append(command)
+    return commands[:4]
+
+
+def run_validation_commands(repo_path: Path, commands: list[str], timeout_sec: int = 60) -> list[dict]:
+    results: list[dict] = []
+    for command in commands:
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=repo_path,
+                shell=True,
+                text=True,
+                capture_output=True,
+                timeout=timeout_sec,
+            )
+            output = (completed.stdout or "") + ("\n" + completed.stderr if completed.stderr else "")
+            results.append(
+                {
+                    "Lệnh": command,
+                    "Exit code": completed.returncode,
+                    "Kết quả": "Pass" if completed.returncode == 0 else "Fail",
+                    "Log": output[-5000:] if output else "(không có output)",
+                }
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = (exc.stdout or "") + ("\n" + exc.stderr if exc.stderr else "")
+            results.append(
+                {
+                    "Lệnh": command,
+                    "Exit code": "timeout",
+                    "Kết quả": "Timeout",
+                    "Log": output[-5000:] if output else f"Lệnh vượt quá {timeout_sec} giây.",
+                }
+            )
+    return results
+
+
+def build_decision_log(
+    user_task: str,
+    repo_profile: dict,
+    style_profile: dict,
+    selected_control: str,
+    selected_control_row: pd.Series,
+    retrieved_chunks: list[dict],
+) -> dict:
+    files = [f"{chunk['path']} :: {chunk['symbol']}" for chunk in retrieved_chunks]
+    validation = runnable_validation_commands(repo_profile)
+    style_lines = [
+        line.strip("- ").strip()
+        for line in str(style_profile.get("Coding style rút ra", "")).splitlines()
+        if line.strip()
+    ]
+    return {
+        "title": user_task.strip() or "Tác vụ chưa đặt tên",
+        "files": files,
+        "reasons": [
+            f"Giữ đúng repo style: {', '.join(style_lines[:3]) if style_lines else style_profile.get('Framework/ngôn ngữ', 'chưa rõ')}.",
+            f"Chỉ dùng context đã retrieve từ {len(files)} đoạn code liên quan thay vì nhét toàn bộ repo vào prompt.",
+            f"Tuân thủ mức kiểm soát {selected_control}: {selected_control_row['AI được làm']}",
+        ],
+        "tradeoffs": [
+            "Không fine-tune model ngay, vì repo thay đổi thường xuyên và RAG cập nhật nhanh hơn.",
+            "Không tạo abstraction mới nếu chưa thấy pattern tương tự trong các file retrieve được.",
+            "Nếu thiếu file liên quan, AI phải yêu cầu retrieve thêm thay vì đoán kiến trúc.",
+        ],
+        "risks": [
+            "Có thể retrieve thiếu context nếu tên task quá chung chung.",
+            "Code sinh ra phải qua test/lint/build trước khi được merge.",
+            f"Con người vẫn giữ quyền: {selected_control_row['Con người phải làm']}",
+        ],
+        "validation": validation or ["Chưa phát hiện lệnh test/lint/build; cần khai báo trong package.json hoặc pyproject.toml."],
+    }
+
+
+def ai_configured() -> bool:
+    return bool(os.getenv("DASHSCOPE_API_KEY") and os.getenv("DASHSCOPE_BASE_URL") and os.getenv("DASHSCOPE_MODEL"))
+
+
+def build_ai_decision_log_text(
+    user_task: str,
+    repo_profile: dict,
+    style_profile: dict,
+    selected_control: str,
+    selected_control_row: pd.Series,
+    retrieved_chunks: list[dict],
+) -> str:
+    if not ai_configured():
+        raise RuntimeError("Thiếu DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL hoặc DASHSCOPE_MODEL trong .env.")
+
+    client = OpenAI(
+        api_key=os.getenv("DASHSCOPE_API_KEY"),
+        base_url=os.getenv("DASHSCOPE_BASE_URL"),
+    )
+    context_snippets = "\n\n".join(
+        f"### {chunk['path']} :: {chunk['symbol']}\n```text\n{chunk['content'][:1600]}\n```"
+        for chunk in retrieved_chunks[:5]
+    )
+    if not context_snippets:
+        context_snippets = "Chưa retrieve được code context; hãy nói rõ cần retrieve thêm trước khi code."
+
+    validation = runnable_validation_commands(repo_profile)
+    prompt = f"""Hãy viết một PR Decision Log bằng tiếng Việt cho AI coding agent.
+
+Tác vụ/PR:
+{user_task}
+
+Repo style:
+- Framework/ngôn ngữ: {style_profile.get("Framework/ngôn ngữ", "chưa rõ")}
+- Cấu trúc project: {style_profile.get("Cấu trúc project", "chưa rõ")}
+- Config quan trọng: {style_profile.get("Config quan trọng", "chưa rõ")}
+- Coding style rút ra:
+{style_profile.get("Coding style rút ra", "chưa rõ")}
+- Skill/convention bổ sung: {style_profile.get("Skill/convention bổ sung", "chưa khai báo")}
+
+Mức kiểm soát AI Agent:
+- {selected_control}
+- AI được làm: {selected_control_row['AI được làm']}
+- Con người phải làm: {selected_control_row['Con người phải làm']}
+
+Code context retrieve từ repo:
+{context_snippets}
+
+Validation cần chạy:
+{chr(10).join(f"- {cmd}" for cmd in validation) if validation else "- Chưa phát hiện lệnh test/lint/build; cần yêu cầu người dùng bổ sung."}
+
+Yêu cầu output:
+- Có tiêu đề PR.
+- Có mục File/context được dùng.
+- Có mục Lý do chọn hướng xử lý.
+- Có mục Trade-off.
+- Có mục Rủi ro & cách kiểm soát.
+- Có mục Validation.
+- Có mục Kết luận ngắn về mức độ tin cậy.
+- Không bịa file không có trong context.
+- Nếu context thiếu, nói rõ cần retrieve thêm.
+"""
+    response = client.chat.completions.create(
+        model=os.getenv("DASHSCOPE_MODEL"),
+        messages=[
+            {
+                "role": "system",
+                "content": "Bạn là senior software engineer viết PR Decision Log rõ ràng, ngắn gọn, có trách nhiệm chất lượng.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+    return response.choices[0].message.content or ""
+
+
+def repo_agent_pipeline_chart() -> go.Figure:
+    labels = [
+        "Folder repo",
+        "Repo Scanner",
+        "Style Profiler",
+        "Vector Index",
+        "Prompt context",
+        "AI sinh code",
+        "Test/Lint/Build",
+        "Code + độ tin cậy",
+    ]
+    fig = go.Figure(
+        data=[
+            go.Sankey(
+                arrangement="fixed",
+                node=dict(
+                    pad=18,
+                    thickness=18,
+                    line=dict(color="#FFFFFF", width=1),
+                    label=labels,
+                    color=[
+                        PALETTE["ink"],
+                        PALETTE["teal"],
+                        PALETTE["gold"],
+                        "#7B9ACC",
+                        PALETTE["coral"],
+                        PALETTE["teal"],
+                        PALETTE["coral"],
+                        PALETTE["ink"],
+                    ],
+                ),
+                link=dict(
+                    source=list(range(len(labels) - 1)),
+                    target=list(range(1, len(labels))),
+                    value=[1] * (len(labels) - 1),
+                    color=["rgba(18,156,154,0.22)"] * (len(labels) - 1),
+                ),
+            )
+        ]
+    )
+    fig.update_layout(
+        height=360,
+        margin=dict(l=10, r=10, t=20, b=10),
+        paper_bgcolor="#FBFAF7",
+        font=dict(size=13, color=PALETTE["ink"]),
+    )
+    return fig
+
+
+def personalization_level_chart() -> go.Figure:
+    level_df = pd.DataFrame(
+        {
+            "Mức": ["Prompt + RAG", "Fine-tune style", "Feedback learning"],
+            "Phù hợp hiện tại": [0.95, 0.45, 0.65],
+            "Chi phí/độ khó": [0.30, 0.85, 0.70],
+        }
+    )
+    fig = go.Figure()
+    fig.add_bar(
+        y=level_df["Mức"],
+        x=level_df["Phù hợp hiện tại"],
+        orientation="h",
+        name="Phù hợp với đề tài",
+        marker_color=PALETTE["teal"],
+    )
+    fig.add_bar(
+        y=level_df["Mức"],
+        x=level_df["Chi phí/độ khó"],
+        orientation="h",
+        name="Chi phí/độ khó",
+        marker_color=PALETTE["coral"],
+    )
+    fig.update_layout(
+        barmode="group",
+        height=300,
+        margin=dict(l=10, r=10, t=20, b=10),
+        xaxis=dict(range=[0, 1], tickformat=".0%"),
+        plot_bgcolor="#FBFAF7",
+        paper_bgcolor="#FBFAF7",
+        legend=dict(orientation="h", y=1.12),
+    )
+    return fig
+
+
+def control_level_chart() -> go.Figure:
+    control_df = pd.DataFrame(
+        {
+            "Mức kiểm soát": [
+                "1. Gợi ý",
+                "2. Copilot có review",
+                "3. Agent bán tự động",
+                "4. Tự động có giám sát",
+            ],
+            "Mức tự động hóa": [0.20, 0.45, 0.70, 0.90],
+            "Mức kiểm soát con người": [0.95, 0.80, 0.55, 0.35],
+        }
+    )
+    fig = go.Figure()
+    fig.add_bar(
+        y=control_df["Mức kiểm soát"],
+        x=control_df["Mức tự động hóa"],
+        orientation="h",
+        name="Tự động hóa",
+        marker_color=PALETTE["teal"],
+    )
+    fig.add_bar(
+        y=control_df["Mức kiểm soát"],
+        x=control_df["Mức kiểm soát con người"],
+        orientation="h",
+        name="Kiểm soát con người",
+        marker_color=PALETTE["coral"],
+    )
+    fig.update_layout(
+        barmode="group",
+        height=330,
+        margin=dict(l=10, r=10, t=20, b=10),
+        xaxis=dict(range=[0, 1], tickformat=".0%"),
+        plot_bgcolor="#FBFAF7",
+        paper_bgcolor="#FBFAF7",
+        legend=dict(orientation="h", y=1.12),
+    )
+    return fig
+
+
+def control_level_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "Mức": "1. Gợi ý",
+                "AI được làm": "Giải thích, gợi ý hướng sửa, tạo checklist, đề xuất test.",
+                "Con người phải làm": "Tự quyết định và tự sửa code.",
+                "Dùng khi": "Task mới, thiếu context repo, rủi ro cao, yêu cầu ngoài nghề.",
+            },
+            {
+                "Mức": "2. Copilot có review",
+                "AI được làm": "Viết nháp code/test theo file liên quan và coding style profile.",
+                "Con người phải làm": "Review diff, chọn merge, kiểm tra logic nghiệp vụ.",
+                "Dùng khi": "Task có tăng tốc code nhưng có rủi ro chất lượng.",
+            },
+            {
+                "Mức": "3. Agent bán tự động",
+                "AI được làm": "Sửa code trong phạm vi nhỏ, chạy test/lint/build, tự sửa lỗi lặp lại.",
+                "Con người phải làm": "Duyệt cuối trước khi merge hoặc deploy.",
+                "Dùng khi": "Repo đã có test tốt, task nằm đúng nghề và đúng module.",
+            },
+            {
+                "Mức": "4. Tự động có giám sát",
+                "AI được làm": "Tự xử lý task lặp lại, tạo PR, cập nhật test và báo cáo độ tin cậy.",
+                "Con người phải làm": "Giám sát policy, audit định kỳ, can thiệp khi validation fail.",
+                "Dùng khi": "Task lặp lại, rủi ro thấp, có CI/CD và rollback rõ ràng.",
+            },
+        ]
+    )
+
+
+def occupation_scope_view(tasks: pd.DataFrame, reskill_task: pd.DataFrame, raw_tasks: pd.DataFrame) -> None:
+    if tasks.empty:
+        st.info("Chưa có dữ liệu task để cá nhân hóa theo nghề.")
+        return
+
+    st.subheader("Cá nhân hóa AI Agent theo repository / coding style personalization")
+    st.markdown(
+        """
+        <div class="explain-box">
+        <b>Ý tưởng chính:</b> khi người dùng đưa vào một folder repo, AI không nên code theo kiểu chung chung.
+        Hệ thống cần hiểu cấu trúc project, framework, convention đặt tên, cách tổ chức file, pattern xử lý lỗi,
+        style test, import/export, comment/documentation và các helper nội bộ đã có.
+        Với một repo cụ thể, hướng tốt nhất là <b>RAG + phân tích codebase + prompt context + kiểm thử tự động</b>,
+        chưa cần fine-tune model ngay.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.plotly_chart(repo_agent_pipeline_chart(), width="stretch")
+
+    st.markdown("### 1. Đưa folder repo vào và quét project")
+    default_repo = str(BASE_DIR)
+    repo_text = st.text_input(
+        "Đường dẫn folder repo",
+        value=default_repo,
+        help="Vì Streamlit chạy local, bạn có thể nhập path folder trên máy để app nhận diện cấu trúc repo.",
+        key="repo_folder_path",
+    )
+    repo_profile = scan_repository(repo_text)
+
+    if not repo_profile["exists"]:
+        st.error("Không tìm thấy folder repo. Hãy kiểm tra lại đường dẫn.")
+    else:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("File đã quét", repo_profile["file_count"])
+        c2.metric("Ngôn ngữ chính", next(iter(repo_profile["languages"]), "Chưa rõ"))
+        c3.metric("Framework", ", ".join(repo_profile["frameworks"][:2]))
+        c4.metric("Config tìm thấy", len(repo_profile["configs"]))
+
+        left, right = st.columns([1, 1])
+        with left:
+            st.markdown("**Ngôn ngữ / file type trong repo**")
+            lang_df = pd.DataFrame(
+                {"Ngôn ngữ": list(repo_profile["languages"].keys()), "Số file": list(repo_profile["languages"].values())}
+            )
+            if not lang_df.empty:
+                fig = px.bar(
+                    lang_df,
+                    x="Số file",
+                    y="Ngôn ngữ",
+                    orientation="h",
+                    color="Số file",
+                    color_continuous_scale=["#E8EEF2", PALETTE["teal"]],
+                )
+                fig.update_layout(
+                    height=300,
+                    margin=dict(l=10, r=10, t=20, b=10),
+                    plot_bgcolor="#FBFAF7",
+                    paper_bgcolor="#FBFAF7",
+                    showlegend=False,
+                )
+                st.plotly_chart(fig, width="stretch")
+            else:
+                st.info("Chưa nhận diện được file code.")
+        with right:
+            st.markdown("**Tín hiệu cấu trúc repo**")
+            st.dataframe(
+                pd.DataFrame(
+                    {
+                        "Loại tín hiệu": ["Framework", "Config", "Thư mục chính", "Style signal"],
+                        "Giá trị": [
+                            ", ".join(repo_profile["frameworks"]),
+                            ", ".join(repo_profile["configs"]) or "Chưa phát hiện",
+                            ", ".join(repo_profile["top_dirs"]) or "Chưa phát hiện",
+                            "\n".join(repo_profile["style_signals"]),
+                        ],
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+    occupations = sorted(tasks["Occupation (O*NET-SOC Title)"].dropna().unique().tolist())
+    selected_occ = st.selectbox(
+        "Chọn ngành nghề / vai trò mà AI Agent được phép hỗ trợ",
+        occupations,
+        help="AI Agent sẽ chỉ thực hiện đúng phạm vi công việc của nghề này.",
+        key="personalized_occupation",
+    )
+
+    occ_tasks = tasks[tasks["Occupation (O*NET-SOC Title)"].eq(selected_occ)].copy()
+    occ_reskill = reskill_task[reskill_task["Occupation (O*NET-SOC Title)"].eq(selected_occ)].copy()
+
+    st.markdown("### 2. Tạo hồ sơ coding style và skill profile")
+    known_skills = extract_known_skills(raw_tasks)
+    selected_skills = st.multiselect(
+        "Thêm skill có sẵn của người dùng / team",
+        known_skills,
+        default=[],
+        help="Các skill này giúp AI cá nhân hóa cách hỗ trợ theo năng lực và vai trò.",
+    )
+    custom_skill_text = st.text_area(
+        "Thêm skill riêng hoặc convention nội bộ",
+        placeholder="Ví dụ: React, FastAPI, Zustand, Vitest, toast.error, Repository pattern, viết test cạnh component...",
+        help="Nhập mỗi skill trên một dòng hoặc ngăn cách bằng dấu phẩy.",
+    )
+    custom_skills = split_skills(custom_skill_text)
+    all_skills = selected_skills + custom_skills
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Task thuộc nghề", len(occ_tasks))
+    c2.metric("Nhóm task", occ_tasks["task_group_vi"].nunique())
+    c3.metric("Task critical", pct(occ_tasks["quality_critical_task"].mean() if len(occ_tasks) else np.nan))
+    c4.metric("Skill đã thêm", len(all_skills))
+
+    allowed_groups = (
+        occ_tasks.groupby("task_group_vi", as_index=False)
+        .agg(
+            task_count=("Task ID", "count"),
+            code_acceleration_potential=("code_acceleration_potential", "mean"),
+            quality_risk_need=("quality_risk_need", "mean"),
+        )
+        .sort_values("task_count", ascending=False)
+    )
+
+    left, right = st.columns([1, 1])
+    with left:
+        st.markdown("**Phạm vi task AI được phép hỗ trợ theo nghề**")
+        st.dataframe(
+            allowed_groups,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "task_group_vi": "Nhóm task",
+                "task_count": "Số task",
+                "code_acceleration_potential": st.column_config.ProgressColumn(
+                    "Tăng tốc code", min_value=0, max_value=1, format="%.2f"
+                ),
+                "quality_risk_need": st.column_config.ProgressColumn(
+                    "Rủi ro chất lượng", min_value=0, max_value=1, format="%.2f"
+                ),
+            },
+        )
+    with right:
+        st.markdown("**Quality gate theo nghề đã chọn**")
+        rec_counts = occ_tasks["agent_recommendation"].value_counts().reindex(list(REC_COLORS.keys())).dropna()
+        if not rec_counts.empty:
+            rec_plot = rec_counts.rename_axis("Khuyến nghị").reset_index(name="Số task")
+            fig = px.bar(
+                rec_plot,
+                x="Số task",
+                y="Khuyến nghị",
+                orientation="h",
+                color="Khuyến nghị",
+                color_discrete_map=REC_COLORS,
+                text="Số task",
+            )
+            fig.update_layout(
+                height=300,
+                margin=dict(l=10, r=10, t=20, b=10),
+                showlegend=False,
+                plot_bgcolor="#FBFAF7",
+                paper_bgcolor="#FBFAF7",
+            )
+            st.plotly_chart(fig, width="stretch")
+        else:
+            st.info("Chưa có đủ khuyến nghị cho nghề này.")
+
+    st.markdown("### 3. Bốn mức kiểm soát AI Agent")
+    st.markdown(
+        """
+        <div class="explain-box">
+        <b>Cách đọc:</b> repo-aware AI Agent không nên chỉ có một chế độ "tự code".
+        Tùy mức rủi ro, chất lượng test và phạm vi nghề, hệ thống cần chọn mức kiểm soát phù hợp:
+        càng rủi ro cao thì càng cần con người review, càng lặp lại và có CI tốt thì agent mới được tự động nhiều hơn.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    recommended_control = "2. Copilot có review"
+    if len(occ_tasks) and occ_tasks["quality_critical_task"].mean() < 0.25 and occ_tasks["quality_risk_need"].mean() < 0.45:
+        recommended_control = "3. Agent bán tự động"
+    if len(occ_tasks) and occ_tasks["quality_critical_task"].mean() > 0.45:
+        recommended_control = "1. Gợi ý"
+
+    control_options = control_level_table()["Mức"].tolist()
+    selected_control = st.radio(
+        "Chọn mức kiểm soát khi AI viết code",
+        control_options,
+        index=control_options.index(recommended_control),
+        horizontal=True,
+        help="Mức này quyết định AI chỉ gợi ý, được viết nháp, được sửa code có validation, hay được tự động hóa task lặp lại.",
+        key="agent_control_level",
+    )
+
+    left, right = st.columns([1, 1.15])
+    with left:
+        st.plotly_chart(control_level_chart(), width="stretch")
+    with right:
+        table = control_level_table()
+        st.dataframe(
+            table,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Mức": "Mức kiểm soát",
+                "AI được làm": "AI được làm",
+                "Con người phải làm": "Con người phải làm",
+                "Dùng khi": "Dùng khi",
+            },
+        )
+
+    selected_control_row = control_level_table().loc[control_level_table()["Mức"].eq(selected_control)].iloc[0]
+    st.markdown(
+        f"""
+        <div class="warning-box">
+        <b>Mức đang chọn:</b> {selected_control}.<br>
+        <b>AI được làm:</b> {selected_control_row['AI được làm']}<br>
+        <b>Con người giữ quyền:</b> {selected_control_row['Con người phải làm']}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    style_profile = {
+        "Framework/ngôn ngữ": ", ".join(repo_profile["frameworks"]),
+        "Cấu trúc project": ", ".join(repo_profile["top_dirs"]) or "Cần đọc thêm repo",
+        "Config quan trọng": ", ".join(repo_profile["configs"]) or "Cần hỏi người dùng",
+        "Test nên chạy": ", ".join(repo_profile["test_commands"]),
+        "Lint/typecheck nên chạy": ", ".join(repo_profile["lint_commands"]),
+        "Build nên chạy": ", ".join(repo_profile["build_commands"]),
+        "Coding style rút ra": "\n".join(f"- {signal}" for signal in inferred_style),
+        "Skill/convention bổ sung": ", ".join(all_skills) if all_skills else "Chưa khai báo",
+        "Mức kiểm soát AI Agent": selected_control,
+    }
+    st.markdown("**Coding Style Profile rút ra từ repo**")
+    st.dataframe(
+        pd.DataFrame({"Thành phần": list(style_profile.keys()), "Kết luận dùng cho AI Agent": list(style_profile.values())}),
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.markdown("### 4. Chia nhỏ code, tạo index và chỉ lấy file liên quan")
+    retrieval_cols = st.columns(3)
+    retrieval_cols[0].markdown(
+        """
+        <div class="path-card">
+        <div class="path-title">Chunk code</div>
+        Chia theo file, function, class, component, module để không nhét toàn bộ repo vào prompt.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    retrieval_cols[1].markdown(
+        """
+        <div class="path-card">
+        <div class="path-title">Vector index / code search</div>
+        Khi user yêu cầu, hệ thống tìm đúng file liên quan như service, page, route, store, test.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    retrieval_cols[2].markdown(
+        """
+        <div class="path-card">
+        <div class="path-title">Prompt có context</div>
+        AI nhận repo style, file liên quan, yêu cầu cụ thể và quy tắc không tạo abstraction mới nếu không cần.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    user_task = st.text_input(
+        "Mô phỏng yêu cầu coding của người dùng",
+        value="Thêm chức năng login bằng Google",
+        key="repo_user_task",
+    )
+    likely_files = st.multiselect(
+        "File/module liên quan nên retrieve vào prompt",
+        [
+            "auth.service.ts",
+            "LoginPage.tsx",
+            "routes.ts",
+            "user.store.ts",
+            "apiClient.ts",
+            "components/AuthButton.tsx",
+            "tests/auth.test.tsx",
+            "README.md",
+        ],
+        default=["auth.service.ts", "LoginPage.tsx", "apiClient.ts", "tests/auth.test.tsx"],
+    )
+
+    st.markdown("### 5. Prompt repo-aware dùng khi gọi AI")
+    top_scope = occ_tasks.sort_values(
+        ["quality_critical_task", "code_acceleration_potential", "quality_risk_need"],
+        ascending=[False, False, False],
+    )
+    prompt = f"""Bạn là AI coding agent cho repository này.
+
+Phạm vi nghề được phép hỗ trợ:
+- {selected_occ}
+
+Repo style:
+- Framework/ngôn ngữ: {style_profile["Framework/ngôn ngữ"]}
+- Cấu trúc project: {style_profile["Cấu trúc project"]}
+- Config quan trọng: {style_profile["Config quan trọng"]}
+- Test nên chạy: {style_profile["Test nên chạy"]}
+- Lint/typecheck nên chạy: {style_profile["Lint/typecheck nên chạy"]}
+- Mức kiểm soát AI Agent: {style_profile["Mức kiểm soát AI Agent"]}
+- Skill/convention bổ sung: {style_profile["Skill/convention bổ sung"]}
+- Tín hiệu style: {"; ".join(repo_profile["style_signals"])}
+
+Các file liên quan cần đưa vào prompt/RAG:
+{chr(10).join(f"- {name}" for name in likely_files) if likely_files else "- Chưa chọn file; phải retrieve trước khi sinh code."}
+
+Yêu cầu của người dùng:
+{user_task}
+
+Quy tắc bắt buộc khi sinh code:
+- Không fine-tune model cho repo này; dùng RAG + style profile + prompt context.
+- Tuân thủ mức kiểm soát đang chọn: {selected_control}.
+- Với mức này, AI được làm: {selected_control_row['AI được làm']}
+- Con người vẫn phải làm: {selected_control_row['Con người phải làm']}
+- Giữ đúng kiến trúc, naming convention, import/export, error handling, test style và helper nội bộ của repo.
+- Không tạo abstraction mới nếu repo hiện tại chưa cần.
+- Nếu yêu cầu nằm ngoài phạm vi nghề {selected_occ}, hãy từ chối thực hiện trực tiếp và đề xuất vai trò phù hợp hơn.
+- Nếu task ảnh hưởng bảo mật, production, dữ liệu, QA hoặc kiến trúc hệ thống, bắt buộc tạo checklist review và test.
+- Sau khi sửa code, chạy validation loop: generate code -> test/lint/build -> đọc lỗi -> sửa -> chạy lại.
+"""
+
+    st.markdown("**Prompt mẫu**")
+    st.code(prompt, language="text")
+
+    st.markdown("### 6. Kiểm thử tự động sau khi AI viết code")
+    validation_df = pd.DataFrame(
+        {
+            "Bước": ["Generate code", "Run test", "Run lint/typecheck", "Run build", "Read error and fix"],
+            "Mục đích": [
+                "Sinh code theo context repo và coding style profile.",
+                "Phát hiện lỗi logic, regression và test thiếu.",
+                "Bắt lỗi format, import, type, convention.",
+                "Kiểm tra app/package còn build được.",
+                "Đưa lỗi ngược lại cho AI sửa tiếp thay vì tin code lần đầu.",
+            ],
+            "Lệnh gợi ý": [
+                "AI edit",
+                ", ".join(repo_profile["test_commands"]),
+                ", ".join(repo_profile["lint_commands"]),
+                ", ".join(repo_profile["build_commands"]),
+                "AI fix from error log",
+            ],
+        }
+    )
+    st.dataframe(validation_df, width="stretch", hide_index=True)
+
+    st.markdown("### 7. Vì sao chưa nên fine-tune ngay?")
+    left, right = st.columns([1, 1])
+    with left:
+        st.plotly_chart(personalization_level_chart(), width="stretch")
+    with right:
         st.markdown(
             """
-            <div class="agent-panel">
-                <div class="agent-title">Pipeline MVP</div>
-                <div class="agent-muted">
-                    Import source → lọc file lớn/vendor → tạo file tree → trích symbol → Agent dùng tool để trả lời.
-                </div>
+            <div class="warning-box">
+            <b>Khuyến nghị cho đề tài:</b> chọn <b>Mức 1 - Prompt + RAG</b>.
+            Fine-tune chỉ nên dùng khi có nhiều ví dụ before/after, nhiều repo ổn định,
+            hoặc muốn học style chung của cả team. Với từng repo thay đổi liên tục,
+            RAG cập nhật nhanh hơn, rẻ hơn và dễ kiểm soát chất lượng hơn.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            """
+            <div class="explain-box">
+            <b>Câu đưa vào bài phân tích:</b><br>
+            Để cá nhân hóa AI Agent trong lập trình, hệ thống không cần huấn luyện lại mô hình cho từng repository.
+            Thay vào đó, repository được phân tích để tạo hồ sơ coding style, index các file và truy xuất các đoạn code
+            liên quan khi người dùng yêu cầu. AI Agent sau đó sinh code dựa trên context thực tế của repo và được kiểm chứng
+            bằng test, lint, build. Cách tiếp cận này giúp AI viết code phù hợp hơn với kiến trúc, convention và chất lượng
+            hiện có của dự án.
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    skipped_files: list[str] = []
-    source_status = "Demo repo mẫu"
-    if uploaded_zip is not None:
-        try:
-            repo_files, skipped_files = parse_zip_repo(uploaded_zip)
-            source_status = f"Đã nạp ZIP: {uploaded_zip.name}"
-            if not repo_files:
-                st.warning("ZIP không có file text/source phù hợp, nên đang hiển thị repo mẫu.")
-                repo_files = default_demo_repo()
-                source_status = "Demo repo mẫu"
-        except zipfile.BadZipFile:
-            st.error("File ZIP không đọc được. Ứng dụng đang quay về repo mẫu.")
-            repo_files = default_demo_repo()
-            source_status = "Demo repo mẫu"
-    else:
-        repo_files = default_demo_repo()
-        if github_url.strip():
-            source_status = "Đã nhận GitHub URL, bước MVP tiếp theo sẽ clone và index repo"
-
-    symbol_table = build_symbol_table(repo_files)
-    file_names = list(repo_files)
-
-    top_metrics = st.columns(4)
-    top_metrics[0].metric("File đã nạp", f"{len(repo_files):,}")
-    top_metrics[1].metric("Symbol tìm thấy", f"{len(symbol_table):,}")
-    top_metrics[2].metric("File bị bỏ qua", f"{len(skipped_files):,}")
-    top_metrics[3].metric("Trạng thái", "Ready")
-
-    left_col, center_col, right_col = st.columns([0.95, 1.65, 1.05])
-
-    with right_col:
-        st.markdown("#### 4 thanh kiểm soát")
-        strictness = st.slider("GitHub Strictness", 0, 100, 82, 5)
-        action_risk = st.slider("Action Risk", 0, 100, 45, 5)
-        human_review = st.slider("Human Review", 0, 100, 75, 5)
-        autonomy = st.slider("Autonomy", 0, 100, 60, 5)
-
-        st.markdown(
-            f"""
-            <div class="risk-note">
-                {control_summary(strictness, action_risk, human_review, autonomy)}
-            </div>
-            """,
-            unsafe_allow_html=True,
+    with st.expander("Xem task cụ thể mà AI Agent được phép xử lý theo nghề đã chọn"):
+        st.dataframe(
+            top_scope[
+                [
+                    "Task",
+                    "task_group_vi",
+                    "quality_critical_task",
+                    "code_acceleration_potential",
+                    "quality_risk_need",
+                    "agent_recommendation",
+                ]
+            ],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Task": "Task được phép",
+                "task_group_vi": "Nhóm task",
+                "quality_critical_task": "Critical",
+                "code_acceleration_potential": st.column_config.ProgressColumn(
+                    "Tăng tốc code", min_value=0, max_value=1, format="%.2f"
+                ),
+                "quality_risk_need": st.column_config.ProgressColumn(
+                    "Rủi ro chất lượng", min_value=0, max_value=1, format="%.2f"
+                ),
+                "agent_recommendation": "Cách AI được phép hỗ trợ",
+            },
         )
 
-        st.markdown("##### Tool được phép")
-        st.dataframe(allowed_tools(action_risk, human_review), width="stretch", hide_index=True, height=300)
-
-        st.markdown("##### Guardrail đang bật")
-        guardrails = [
-            "Không bịa nội dung file chưa đọc.",
-            "Không apply patch trực tiếp trong prototype.",
-            "Auth, security, database và payment luôn cần review.",
-            "Câu trả lời phải nêu rõ file/dòng khi có bằng chứng.",
-        ]
-        for item in guardrails:
-            st.markdown(f"- {item}")
-
-    with left_col:
-        st.markdown("#### Repo Explorer")
-        st.markdown(
-            f"""
-            <div class="agent-panel-dark">
-                <span class="agent-status">{source_status}</span>
-                <div class="agent-title">File tree</div>
-                <div class="agent-muted">Chọn file để xem nội dung và để Agent dùng làm bằng chứng.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
+    blocked_examples = tasks[~tasks["Occupation (O*NET-SOC Title)"].eq(selected_occ)].copy()
+    blocked_examples = blocked_examples.sample(min(6, len(blocked_examples)), random_state=7)
+    with st.expander("Ví dụ yêu cầu ngoài phạm vi nên bị chặn"):
+        st.dataframe(
+            blocked_examples[["Occupation (O*NET-SOC Title)", "Task", "task_group_vi"]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Occupation (O*NET-SOC Title)": "Nghề khác",
+                "Task": "Task ngoài phạm vi",
+                "task_group_vi": "Nhóm task",
+            },
         )
-        selected_file = st.selectbox("File", file_names, key="agent_selected_file")
-        preview_files = file_names[:10]
-        st.markdown(
-            "".join(f'<div class="agent-file">{path}</div>' for path in preview_files),
-            unsafe_allow_html=True,
+
+
+def repo_personalization_solution_view(tasks: pd.DataFrame, reskill_task: pd.DataFrame, raw_tasks: pd.DataFrame) -> None:
+    if tasks.empty:
+        st.info("Chưa có dữ liệu task để cá nhân hóa AI Agent.")
+        return
+
+    st.subheader("Khuyến nghị giải pháp cá nhân hóa AI Agent")
+
+    top_left, top_mid, top_right = st.columns([1.25, 1, 1])
+    with top_left:
+        repo_input_mode = st.radio(
+            "Cách đưa repo vào",
+            ["Nhập đường dẫn folder", "Upload file .zip"],
+            horizontal=True,
+            key="repo_input_mode_compact",
         )
-        if len(file_names) > len(preview_files):
-            st.caption(f"Còn {len(file_names) - len(preview_files):,} file khác.")
-
-        st.markdown("#### Symbol Outline")
-        if symbol_table.empty:
-            st.info("Chưa phát hiện function/class trong các file đã nạp.")
-        else:
-            st.dataframe(symbol_table.head(20), width="stretch", hide_index=True, height=260)
-
-    with center_col:
-        st.markdown("#### Editor tri thức")
-        selected_content = repo_files[selected_file]
-        st.code(selected_content, language=language_for_path(selected_file), line_numbers=True)
-
-        st.markdown("#### Agent chat")
-        question = st.text_area(
-            "Câu hỏi cho Agent",
-            value="Hàm login ảnh hưởng đến những file nào?",
-            height=88,
-            key="agent_question",
-        )
-        ai_settings = get_ai_settings()
-        if ai_settings["configured"]:
-            st.caption(f"AI thật đang bật: {ai_settings['provider']} / {ai_settings['model']}")
-        else:
-            st.warning("Chưa thấy cấu hình AI hợp lệ trong `.env`; bấm nút sẽ dùng phân tích local.")
-        run_agent = st.button("Agent phân tích", type="primary", key="agent_run")
-
-        query = question.strip() or "Phân tích repo hiện tại"
-        repo_signature = f"{source_status}|{len(repo_files)}|{selected_file}"
-        if run_agent:
-            with st.spinner("Agent đang đọc repo, gọi tool và hỏi AI trong .env..."):
-                conclusion, trace, answer_source = ask_configured_ai(
-                    repo_files,
-                    symbol_table,
-                    selected_file,
-                    query,
-                    strictness,
-                    action_risk,
-                    human_review,
-                    autonomy,
-                )
-            st.session_state["agent_result"] = {
-                "question": query,
-                "repo_signature": repo_signature,
-                "conclusion": conclusion,
-                "trace": trace,
-                "answer_source": answer_source,
-            }
-
-        result = st.session_state.get("agent_result")
-        if result and result.get("repo_signature") == repo_signature:
-            if result.get("answer_source") == "ai":
-                st.success("AI trong .env đã phân tích xong")
+        if repo_input_mode == "Upload file .zip":
+            uploaded_repo = st.file_uploader(
+                "Upload repo đã nén .zip",
+                type=["zip"],
+                help="Nén cả folder repo thành .zip rồi upload. App sẽ tự giải nén và quét cấu trúc.",
+                key="repo_zip_uploader",
+            )
+            if uploaded_repo is not None:
+                repo_root = safe_extract_zip(uploaded_repo.getvalue(), uploaded_repo.name)
+                repo_text = str(repo_root)
+                st.caption(f"Đã nạp repo từ ZIP: {repo_root}")
             else:
-                st.warning("Đang hiển thị kết quả fallback/local vì AI chưa gọi được")
-            st.markdown(f"**Câu hỏi:** {result['question']}")
-            st.info(result["conclusion"])
-            st.markdown('<div class="agent-trace">Tool trace của lượt phân tích</div>', unsafe_allow_html=True)
-            st.dataframe(result["trace"], width="stretch", hide_index=True)
+                repo_text = str(BASE_DIR)
+                st.caption("Chưa upload ZIP, app tạm dùng repo hiện tại.")
         else:
+            repo_text = st.text_input(
+                "Folder repo",
+                value=str(BASE_DIR),
+                help="Ví dụ: E:\\du-an\\my-repo. Nếu không biết path, hãy nén repo thành .zip và chọn chế độ upload.",
+                key="repo_folder_path_compact",
+            )
+    occupations = sorted(tasks["Occupation (O*NET-SOC Title)"].dropna().unique().tolist())
+    with top_mid:
+        selected_occ = st.selectbox(
+            "Vai trò/nghề",
+            occupations,
+            help="AI Agent chỉ được xử lý đúng phạm vi nghề này.",
+            key="personalized_occupation_compact",
+        )
+    with top_right:
+        custom_skill_text = st.text_area(
+            "Skill/convention thêm",
+            placeholder="React, FastAPI, Vitest, toast.error...",
+            help="Nhập mỗi skill trên một dòng hoặc ngăn cách bằng dấu phẩy.",
+            height=88,
+            key="compact_skill_text",
+        )
+
+    repo_profile = scan_repository(repo_text)
+    repo_path = Path(repo_profile["path"])
+    inferred_style = infer_coding_style_profile(repo_path, repo_profile) if repo_profile["exists"] else []
+    occ_tasks = tasks[tasks["Occupation (O*NET-SOC Title)"].eq(selected_occ)].copy()
+    known_skills = extract_known_skills(raw_tasks)
+    selected_skills = st.multiselect(
+        "Chọn skill có sẵn",
+        known_skills,
+        default=[],
+        key="compact_skill_picker",
+    )
+    all_skills = selected_skills + split_skills(custom_skill_text)
+
+    recommended_level = 2
+    if len(occ_tasks) and occ_tasks["quality_critical_task"].mean() < 0.25 and occ_tasks["quality_risk_need"].mean() < 0.45:
+        recommended_level = 3
+    if len(occ_tasks) and occ_tasks["quality_critical_task"].mean() > 0.45:
+        recommended_level = 1
+
+    control_df = control_level_table()
+    group_signal = (
+        occ_tasks.groupby("task_group_vi", as_index=False)
+        .agg(
+            W=("worker_pull_index", "mean"),
+            E=("automation_exposure_index", "mean"),
+            quality_gap=("quality_risk_need", "mean"),
+            task_count=("Task ID", "count"),
+        )
+        .sort_values("quality_gap", ascending=False)
+        .head(4)
+    )
+
+    main_left, main_right = st.columns([1, 1])
+    with main_left:
+        with st.container(border=True):
+            st.markdown("**🎛️ Giải pháp 2 — Micro-Agency Slider (Thanh trượt Tự chủ)**")
+            st.write(
+                "Thanh trượt 4 mức cho phép kỹ sư tự điều chỉnh mức can thiệp của AI theo từng tác vụ. "
+                "Mức mặc định được gợi ý từ rủi ro chất lượng và task critical của vai trò đã chọn."
+            )
+            selected_level = st.slider(
+                "Kéo thanh trượt để thử nghiệm mức độ tự trị",
+                min_value=1,
+                max_value=4,
+                value=recommended_level,
+                step=1,
+                key="agent_control_slider_compact",
+            )
+            marker_left = {1: 0, 2: 32, 3: 65, 4: 96}[selected_level]
             st.markdown(
-                """
-                <div class="agent-trace">
-                    Chưa có lượt phân tích nào cho file đang chọn. Nhấn <strong>Agent phân tích</strong>
-                    để Agent đọc file, tìm symbol và trả lời kèm tool trace.
+                f"""
+                <div class="level-rail">
+                    <div class="level-marker" style="left: calc({marker_left}% - 11px);"></div>
+                </div>
+                <div class="level-labels">
+                    <div>💡 Gợi ý<br><b>Mức 1</b></div>
+                    <div>📝 Dẫn ý<br><b>Mức 2</b></div>
+                    <div>💻 Code<br><b>Mức 3</b></div>
+                    <div>🚀 Deploy<br><b>Mức 4</b></div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-st.sidebar.title("Chế độ")
-app_mode = st.sidebar.radio("Chọn giao diện", ["Dashboard phân tích", "Code Agent IDE"], index=0)
-if app_mode == "Code Agent IDE":
-    render_code_agent_mode()
-    st.stop()
-
-
-tables, missing_tables = load_tables()
-if missing_tables:
-    st.title("Dashboard chuyển dịch kỹ năng AI")
-    st.error("Thiếu file output bắt buộc. Hãy chạy pipeline hoặc notebook phân tích trước.")
-    st.write([str(path) for path in missing_tables])
-    st.stop()
-
-task = tables["task"]
-skill = tables["skill"]
-reliable_skill = tables["reliable_skill"]
-occupation = tables["occupation"]
-sector = tables["sector"]
-worker_group = tables["worker_group"]
-model_occupation = tables.get("model_occupation", pd.DataFrame())
-model_sector = tables.get("model_sector", pd.DataFrame())
-
-
-st.sidebar.title("Bộ lọc")
-all_sectors = sorted(task["sector"].dropna().astype(str).unique())
-selected_sectors = st.sidebar.multiselect("Ngành", all_sectors)
-occupation_query = st.sidebar.text_input("Tìm nghề hoặc task")
-
-transition_options = sorted(task["transition_type"].dropna().astype(str).unique())
-selected_transitions = st.sidebar.multiselect("Loại chuyển dịch", transition_options)
-
-mismatch_options = sorted(task["mismatch_type"].dropna().astype(str).unique())
-selected_mismatches = st.sidebar.multiselect("Loại lệch pha", mismatch_options)
-
-top_n = st.sidebar.slider("Số dòng top trong biểu đồ", min_value=5, max_value=30, value=15, step=5)
-show_reliable_only = st.sidebar.checkbox("Chỉ dùng ranking đủ tin cậy", value=True)
-
-task_scope = filtered_tasks(
-    task,
-    selected_sectors,
-    occupation_query,
-    selected_transitions,
-    selected_mismatches,
-)
-
-occupation_scope = filter_by_task_scope(occupation, task_scope, "Occupation (O*NET-SOC Title)")
-sector_scope = filter_by_task_scope(sector, task_scope, "sector")
-
-st.title("Dashboard chuyển dịch kỹ năng khi có AI")
-st.caption(
-    "Trực quan hóa task, kỹ năng, nghề, ngành, nhóm worker và kết quả mô hình khám phá."
-)
-
-with st.expander("Các chỉ số này nói gì?", expanded=False):
-    st.markdown(
-        """
-        - `automation_exposure_index`: AI đã có nhiều tín hiệu có thể tham gia vào task này.
-        - `worker_pull_index`: người làm việc có xu hướng muốn AI hỗ trợ hoặc tự động hóa task này.
-        - `human_complementarity_index`: task vẫn cần con người vì chuyên môn, giao tiếp, phán đoán hoặc kiểm soát chất lượng.
-        - `skill_shift_pressure`: áp lực thay đổi kỹ năng/task càng cao khi automation exposure và worker pull cao nhưng human complementarity thấp hơn.
-        - `exploratory_shift_score`: điểm xếp hạng từ mô hình khám phá; dùng để chọn nơi cần xem sâu hơn, không phải dự báo chắc chắn.
-        """
-    )
-
-
-metric_cols = st.columns(6)
-metric_cols[0].metric("Task", f"{len(task_scope):,}", f"{len(task):,} tổng")
-metric_cols[1].metric(
-    "Nghề",
-    f"{task_scope['Occupation (O*NET-SOC Title)'].nunique():,}",
-    f"{task['Occupation (O*NET-SOC Title)'].nunique():,} tổng",
-)
-metric_cols[2].metric("Ngành", f"{task_scope['sector'].nunique():,}", f"{task['sector'].nunique():,} tổng")
-metric_cols[3].metric("Tín hiệu worker", pct(task_scope["has_worker_signal"].mean()))
-metric_cols[4].metric("Tín hiệu expert", pct(task_scope["has_expert_signal"].mean()))
-metric_cols[5].metric("Cặp worker + expert", pct(task_scope["paired_worker_expert_signal"].mean()))
-
-summary_skill = (reliable_skill.copy() if show_reliable_only else skill.copy()).sort_values(
-    "skill_shift_pressure", ascending=False
-)
-summary_occupation = occupation_scope.sort_values("skill_shift_pressure", ascending=False)
-summary_sector = sector_scope.sort_values("skill_shift_pressure", ascending=False)
-transition_leader = (
-    task_scope["transition_type"].value_counts(dropna=True).idxmax()
-    if not task_scope.empty and task_scope["transition_type"].notna().any()
-    else "n/a"
-)
-mismatch_leader = (
-    task_scope["mismatch_type"].value_counts(dropna=True).idxmax()
-    if not task_scope.empty and task_scope["mismatch_type"].notna().any()
-    else "n/a"
-)
-
-st.subheader("Diễn giải nhanh")
-card_cols = st.columns(4)
-with card_cols[0]:
-    insight_card(
-        "Tín hiệu kỹ năng chính",
-        "Kỹ năng có áp lực chuyển dịch cao nhất trong bộ lọc hiện tại: "
-        f"{first_or_na(summary_skill, 'skill_list')}. Nên đọc như ưu tiên reskilling, không phải kết luận thay thế con người.",
-    )
-with card_cols[1]:
-    insight_card(
-        "Nghề cần chú ý",
-        "Nghề có áp lực chuyển dịch cao nhất: "
-        f"{first_or_na(summary_occupation, 'Occupation (O*NET-SOC Title)')}. Xem bảng task để biết task nào đang kéo điểm lên.",
-    )
-with card_cols[2]:
-    insight_card(
-        "Mẫu hình theo ngành",
-        "Ngành nổi bật nhất trong bộ lọc: "
-        f"{first_or_na(summary_sector, 'sector')}. Điểm ngành là trung bình từ nhiều task, nên ngành có mẫu nhỏ cần đọc thận trọng.",
-    )
-with card_cols[3]:
-    insight_card(
-        "Cách đọc chủ đạo",
-        f"Loại chuyển dịch phổ biến nhất: {transition_leader}. Lệch pha phổ biến nhất: {mismatch_leader}. Các nhãn này tóm tắt pattern ở cấp task.",
-    )
-
-
-tabs = st.tabs(["Tổng quan", "Khám phá dữ liệu"])
-
-
-with tabs[0]:
-    st.markdown(
-        """
-        **Ý nghĩa chính:** dashboard này cho thấy task nào có khả năng đổi cách làm khi AI tham gia.
-        Nếu một task vừa có tín hiệu AI mạnh vừa được worker muốn tự động hóa, nó đáng được xem như ứng viên
-        để thiết kế lại quy trình. Nếu task vẫn cần human complementarity cao, hướng phù hợp hơn thường là
-        AI hỗ trợ con người thay vì thay thế hoàn toàn.
-        """
-    )
-    left, right = st.columns([1.35, 1])
-
-    with left:
-        plot_data = task_scope.dropna(
-            subset=["automation_exposure_index", "human_complementarity_index"]
-        ).copy()
-        if plot_data.empty:
-            st.info("Không có task đủ dữ liệu chỉ số để vẽ quadrant plot.")
-        else:
-            plot_data["bubble_size"] = (
-                plot_data["worker_pull_index"].fillna(plot_data["worker_pull_index"].median())
-                .clip(lower=0)
-                .mul(28)
-                .add(6)
+            selected_control = control_df.iloc[selected_level - 1]["Mức"]
+            selected_control_row = control_df.iloc[selected_level - 1]
+            st.markdown(
+                f"""
+                <div class="selected-level">
+                <b>{selected_control}:</b> {selected_control_row['AI được làm']}
+                <br><span class="small-note">Con người giữ quyền: {selected_control_row['Con người phải làm']}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-            fig = px.scatter(
-                plot_data,
-                x="automation_exposure_index",
-                y="human_complementarity_index",
-                size="bubble_size",
-                color="skill_shift_pressure",
-                hover_name="Task",
-                hover_data={
-                    "Occupation (O*NET-SOC Title)": True,
-                    "sector": True,
-                    "worker_pull_index": ":.3f",
-                    "skill_shift_pressure": ":.3f",
-                    "bubble_size": False,
-                },
-                color_continuous_scale="Viridis",
-                title="Quadrant task: automation exposure và human complementarity",
+
+            st.markdown("**Chỉ số W, E, GAP của các nhóm task ở mức này:**")
+            if group_signal.empty:
+                st.info("Chưa có dữ liệu nhóm task cho nghề này.")
+            else:
+                for _, row in group_signal.iterrows():
+                    w_score = row["W"] * 3
+                    e_score = row["E"] * 3
+                    gap_score = row["quality_gap"] * 3
+                    st.markdown(
+                        f"""
+                        <div class="compact-row">
+                            <b>{row['task_group_vi']}</b>
+                            <span>W: {w_score:.1f}</span>
+                            <span>E: {e_score:.1f}</span>
+                            <span style="color:#EF3F3F;font-weight:700;">Gap: {gap_score:+.1f}</span>
+                            <span class="level-pill">🚀 Mức {selected_level}</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+    style_profile = {
+        "Framework/ngôn ngữ": ", ".join(repo_profile["frameworks"]),
+        "Cấu trúc project": ", ".join(repo_profile["top_dirs"]) or "Cần đọc thêm repo",
+        "Config quan trọng": ", ".join(repo_profile["configs"]) or "Cần hỏi người dùng",
+        "Test nên chạy": ", ".join(repo_profile["test_commands"]),
+        "Lint/typecheck nên chạy": ", ".join(repo_profile["lint_commands"]),
+        "Build nên chạy": ", ".join(repo_profile["build_commands"]),
+        "Coding style rút ra": "\n".join(f"- {signal}" for signal in inferred_style),
+        "Skill/convention bổ sung": ", ".join(all_skills) if all_skills else "Chưa khai báo",
+        "Mức kiểm soát AI Agent": selected_control,
+    }
+
+    with main_right:
+        with st.container(border=True):
+            st.markdown("**🛡️ Giải pháp 3 — AI PR-Defense (Bản tự thuyết minh giải pháp)**")
+            st.write(
+                "Với task có khoảng trống niềm tin cao, AI không chỉ sinh code mà phải sinh kèm Decision Log: "
+                "lý do chọn giải pháp, trade-off, rủi ro và lệnh kiểm thử."
             )
-            fig.add_vline(x=0.6, line_width=1, line_dash="dash", line_color="#94a3b8")
-            fig.add_hline(y=0.6, line_width=1, line_dash="dash", line_color="#94a3b8")
-            fig.update_layout(height=580, margin=dict(l=8, r=8, t=48, b=8))
-            st.plotly_chart(fig, width="stretch")
+            user_task = st.text_input(
+                "Nhập tiêu đề Pull Request hoặc tác vụ",
+                value="Tích hợp Rate-Limiter (Redis Lua script)",
+                key="repo_user_task_compact",
+            )
+            code_index = build_code_index(repo_path) if repo_profile["exists"] else []
+            retrieved_chunks = retrieve_relevant_chunks(code_index, user_task, top_k=5)
             st.caption(
-                "Góc phải-trên gợi ý AI hỗ trợ con người; góc phải-dưới nghiêng về tự động hóa nhiều hơn; góc trái-trên là vùng kỹ năng con người còn bền."
+                f"Đã tạo {len(code_index)} code chunks và retrieve {len(retrieved_chunks)} đoạn liên quan cho task này."
             )
+            generation_signature = {
+                "task": user_task,
+                "level": selected_level,
+                "control": selected_control,
+                "repo": str(repo_profile["path"]),
+                "files": [f"{chunk['path']}::{chunk['symbol']}" for chunk in retrieved_chunks],
+            }
+            if st.button("Sinh Thuyết minh Quyết định bằng AI", key="fake_pr_defense_button"):
+                with st.spinner("Đang gọi AI để sinh Decision Log từ repo context..."):
+                    try:
+                        ai_text = build_ai_decision_log_text(
+                            user_task=user_task,
+                            repo_profile=repo_profile,
+                            style_profile=style_profile,
+                            selected_control=selected_control,
+                            selected_control_row=selected_control_row,
+                            retrieved_chunks=retrieved_chunks,
+                        )
+                        st.session_state["generated_decision_log"] = {
+                            "mode": "ai",
+                            "signature": generation_signature,
+                            "title": user_task,
+                            "markdown": ai_text,
+                        }
+                    except Exception as exc:
+                        fallback_log = build_decision_log(
+                            user_task=user_task,
+                            repo_profile=repo_profile,
+                            style_profile=style_profile,
+                            selected_control=selected_control,
+                            selected_control_row=selected_control_row,
+                            retrieved_chunks=retrieved_chunks,
+                        )
+                        st.session_state["generated_decision_log"] = {
+                            "mode": "fallback",
+                            "signature": generation_signature,
+                            "title": fallback_log["title"],
+                            "data": fallback_log,
+                            "error": str(exc),
+                        }
 
-    with right:
-        transition_counts = (
-            task_scope["transition_type"]
-            .value_counts(dropna=False)
-            .rename_axis("transition_type")
-            .reset_index(name="tasks")
-        )
-        fig = px.bar(
-            transition_counts,
-            x="tasks",
-            y="transition_type",
-            orientation="h",
-            title="Phân bố loại chuyển dịch",
-            color="tasks",
-            color_continuous_scale="Blues",
-        )
-        fig.update_layout(height=270, margin=dict(l=8, r=8, t=44, b=8), showlegend=False)
-        st.plotly_chart(fig, width="stretch")
-        st.caption(
-            "Mỗi nhãn tóm tắt một kiểu thay đổi có thể xảy ra ở cấp task, giúp thấy nhanh nhóm task nào cần ưu tiên phân tích."
-        )
-
-        mismatch_counts = (
-            task_scope["mismatch_type"]
-            .value_counts(dropna=False)
-            .rename_axis("mismatch_type")
-            .reset_index(name="tasks")
-        )
-        fig = px.bar(
-            mismatch_counts,
-            x="tasks",
-            y="mismatch_type",
-            orientation="h",
-            title="Lệch pha giữa khả năng AI và mong muốn worker",
-            color="tasks",
-            color_continuous_scale="Oranges",
-        )
-        fig.update_layout(height=300, margin=dict(l=8, r=8, t=44, b=8), showlegend=False)
-        st.plotly_chart(fig, width="stretch")
-        st.caption(
-            "Lệch pha cho biết worker desire, expert capability và nhu cầu human agency đang cùng hướng hay ngược hướng."
-        )
-
-    st.subheader("Các ranking chính")
-    st.markdown(
-        "Ba ranking này trả lời ba câu hỏi khác nhau: **kỹ năng** nào cần reskilling, **nghề** nào có cụm task dễ chuyển dịch hơn, và **ngành** nào có áp lực rộng hơn."
-    )
-    skill_col, occ_col, sec_col = st.columns(3)
-
-    with skill_col:
-        skill_scope = reliable_skill.copy() if show_reliable_only else skill.copy()
-        skill_scope = skill_scope.sort_values("skill_shift_pressure", ascending=False).head(top_n)
-        horizontal_bar(
-            skill_scope,
-            x="skill_shift_pressure",
-            y="skill_list",
-            color="automation_exposure_index",
-            title="Kỹ năng",
-            height=430,
-        )
-
-    with occ_col:
-        occ_rank = occupation_scope.sort_values("skill_shift_pressure", ascending=False).head(top_n)
-        horizontal_bar(
-            occ_rank,
-            x="skill_shift_pressure",
-            y="Occupation (O*NET-SOC Title)",
-            color="automation_exposure_index",
-            title="Nghề",
-            height=430,
-        )
-
-    with sec_col:
-        sec_rank = sector_scope.sort_values("skill_shift_pressure", ascending=False).head(top_n)
-        horizontal_bar(
-            sec_rank,
-            x="skill_shift_pressure",
-            y="sector",
-            color="automation_exposure_index",
-            title="Ngành",
-            height=430,
-        )
-
-    st.subheader("Độ phủ theo loại tín hiệu")
-    st.caption(
-        "Coverage là kiểm tra chất lượng dữ liệu. Coverage thấp nghĩa là điểm số trong bộ lọc hiện tại có ít bằng chứng hơn."
-    )
-    coverage = (
-        task_scope[
-            [
-                "has_worker_signal",
-                "has_expert_signal",
-                "has_usage_signal",
-                "has_paper_signal",
-                "has_company_signal",
-                "paired_worker_expert_signal",
-            ]
-        ]
-        .mean()
-        .mul(100)
-        .round(1)
-        .rename("coverage_pct")
-        .reset_index()
-        .rename(columns={"index": "signal"})
-    )
-    st.dataframe(coverage, width="stretch", hide_index=True)
-
-    with st.expander("Hình đã tạo từ pipeline"):
-        figure_paths = [
-            FIGURE_DIR / "task_skill_shift_quadrant.png",
-            FIGURE_DIR / "capability_desire_mismatch.png",
-            FIGURE_DIR / "top_skill_shift_pressure.png",
-        ]
-        cols = st.columns(3)
-        for col, path in zip(cols, figure_paths):
-            with col:
-                if path.exists():
-                    st.image(str(path), caption=path.name, width="stretch")
+            decision_log = st.session_state.get("generated_decision_log")
+            if decision_log and decision_log.get("signature") == generation_signature:
+                if decision_log["mode"] == "ai":
+                    st.success("Đã sinh Decision Log bằng AI từ repo context và mức kiểm soát hiện tại.")
+                    st.markdown(decision_log["markdown"])
+                    st.download_button(
+                        "Tải decision log .md",
+                        data=decision_log["markdown"].encode("utf-8"),
+                        file_name="ai_pr_decision_log.md",
+                        mime="text/markdown",
+                    )
                 else:
-                    st.warning(f"Thiếu {path.name}")
+                    st.warning(f"Không gọi được AI, đang dùng bản fallback rule-based. Lỗi: {decision_log.get('error', 'không rõ')}")
+                    fallback = decision_log["data"]
+                    files_html = "".join(f"<li>{file}</li>" for file in fallback["files"][:5]) or "<li>Chưa retrieve được file liên quan.</li>"
+                    reasons_html = "".join(f"<li>{item}</li>" for item in fallback["reasons"])
+                    tradeoffs_html = "".join(f"<li>{item}</li>" for item in fallback["tradeoffs"])
+                    risks_html = "".join(f"<li>{item}</li>" for item in fallback["risks"])
+                    validation_html = "".join(f"<li>{item}</li>" for item in fallback["validation"])
+                    fallback_md = (
+                        f"# PR Decision Log: {fallback['title']}\n\n"
+                        + "## File/context\n"
+                        + "\n".join(f"- {file}" for file in fallback["files"])
+                        + "\n\n## Lý do\n"
+                        + "\n".join(f"- {item}" for item in fallback["reasons"])
+                        + "\n\n## Trade-off\n"
+                        + "\n".join(f"- {item}" for item in fallback["tradeoffs"])
+                        + "\n\n## Rủi ro\n"
+                        + "\n".join(f"- {item}" for item in fallback["risks"])
+                        + "\n\n## Validation\n"
+                        + "\n".join(f"- {item}" for item in fallback["validation"])
+                    )
+                    st.markdown(
+                        f"""
+                        <div class="pr-card">
+                            <div class="pr-header">📄 PR #402: {fallback['title']}</div>
+                            <b>AI lập luận quyết định (Defense):</b>
+                            <ol>
+                                <li><b>File/context được dùng:</b><ul>{files_html}</ul></li>
+                                <li><b>Lý do chọn hướng xử lý:</b><ul>{reasons_html}</ul></li>
+                                <li><b>Trade-off:</b><ul>{tradeoffs_html}</ul></li>
+                                <li><b>Rủi ro & kiểm soát:</b><ul>{risks_html}</ul></li>
+                                <li><b>Validation cần chạy:</b><ul>{validation_html}</ul></li>
+                            </ol>
+                            <div class="success-note">💡 <b>Kết quả:</b> PR có context repo, lý do kỹ thuật, trade-off và quality gate rõ ràng.</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    st.download_button(
+                        "Tải decision log .md",
+                        data=fallback_md.encode("utf-8"),
+                        file_name="ai_pr_decision_log.md",
+                        mime="text/markdown",
+                    )
+            else:
+                st.info("Nhập tác vụ, chọn mức kiểm soát rồi bấm nút để sinh Decision Log mới từ AI.")
 
-
-with tabs[1]:
-    st.markdown(
-        """
-        **Đi sâu vào bằng chứng:** tab này cho phép xem task cụ thể đứng sau các kết luận tổng quan.
-        Những task có `skill_shift_pressure` cao là nơi quy trình làm việc có thể thay đổi mạnh hơn.
-        Những task có `human_complementarity_index` cao là nơi con người vẫn giữ vai trò quan trọng.
-        """
+    likely_files = [f"{chunk['path']} :: {chunk['symbol']}" for chunk in retrieved_chunks]
+    context_snippets = "\n\n".join(
+        f"### {chunk['path']} :: {chunk['symbol']}\n```text\n{chunk['content'][:1800]}\n```"
+        for chunk in retrieved_chunks
     )
-    task_section, model_section, table_section = st.columns([1.2, 1, 0.9])
+    if not context_snippets:
+        context_snippets = "Chưa retrieve được đoạn code liên quan. Hãy upload repo hoặc nhập path repo đúng trước khi gọi AI."
 
-    with task_section:
-        st.subheader("Khám phá task")
-        if not task_scope.empty:
-            task_leader = task_scope.sort_values("skill_shift_pressure", ascending=False).iloc[0]
-            st.info(
-                "Task có áp lực cao nhất trong bộ lọc hiện tại: "
-                f"{concise_task(task_leader['Task'])} "
-                f"({task_leader['Occupation (O*NET-SOC Title)']})."
-            )
-        sort_options = [col for col in SCORE_COLUMNS if col in task_scope.columns]
-        sort_by = st.selectbox(
-            "Sắp xếp task theo",
-            sort_options,
-            index=sort_options.index("skill_shift_pressure"),
-            key="task_sort_by",
+    prompt = f"""Bạn là AI coding agent cho repository này.
+
+Phạm vi nghề được phép hỗ trợ:
+- {selected_occ}
+
+Repo style:
+- Framework/ngôn ngữ: {style_profile["Framework/ngôn ngữ"]}
+- Cấu trúc project: {style_profile["Cấu trúc project"]}
+- Config quan trọng: {style_profile["Config quan trọng"]}
+- Test nên chạy: {style_profile["Test nên chạy"]}
+- Lint/typecheck nên chạy: {style_profile["Lint/typecheck nên chạy"]}
+- Mức kiểm soát AI Agent: {style_profile["Mức kiểm soát AI Agent"]}
+- Coding style rút ra:
+{style_profile["Coding style rút ra"]}
+- Skill/convention bổ sung: {style_profile["Skill/convention bổ sung"]}
+
+Các file liên quan cần đưa vào prompt/RAG:
+{chr(10).join(f"- {name}" for name in likely_files) if likely_files else "- Chưa có file liên quan."}
+
+Trích đoạn code liên quan từ repo:
+{context_snippets}
+
+Yêu cầu của người dùng:
+{user_task}
+
+Quy tắc bắt buộc:
+- Không fine-tune model cho repo này; dùng RAG + style profile + prompt context.
+- Tuân thủ mức kiểm soát đang chọn: {selected_control}.
+- AI được làm: {selected_control_row['AI được làm']}
+- Con người vẫn phải làm: {selected_control_row['Con người phải làm']}
+- Sau khi sửa code, chạy validation loop: generate code -> test/lint/build -> đọc lỗi -> sửa -> chạy lại.
+"""
+
+    with st.expander("Xem hồ sơ repo, prompt RAG và validation loop"):
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("File đã quét", repo_profile["file_count"])
+        metric_cols[1].metric("Ngôn ngữ chính", next(iter(repo_profile["languages"]), "Chưa rõ"))
+        metric_cols[2].metric("Framework", ", ".join(repo_profile["frameworks"][:2]))
+        metric_cols[3].metric("Task critical", pct(occ_tasks["quality_critical_task"].mean() if len(occ_tasks) else np.nan))
+
+        pipeline_df = pd.DataFrame(
+            [
+                {
+                    "Bước": "1. Quét repo",
+                    "Kết quả": f"{repo_profile['file_count']} file, framework: {', '.join(repo_profile['frameworks'])}",
+                },
+                {
+                    "Bước": "2. Style profile",
+                    "Kết quả": f"{len(inferred_style)} tín hiệu style/convention",
+                },
+                {
+                    "Bước": "3. Chunk + index",
+                    "Kết quả": f"{len(code_index)} chunk theo file/function/class/component",
+                },
+                {
+                    "Bước": "4. Retrieve context",
+                    "Kết quả": f"{len(retrieved_chunks)} đoạn code liên quan đến task",
+                },
+                {
+                    "Bước": "5. Validation loop",
+                    "Kết quả": f"Test: {style_profile['Test nên chạy']} | Lint: {style_profile['Lint/typecheck nên chạy']} | Build: {style_profile['Build nên chạy']}",
+                },
+            ]
         )
-        ascending = st.checkbox("Tăng dần", value=False, key="task_ascending")
+        st.dataframe(pipeline_df, width="stretch", hide_index=True)
 
-        task_view = task_scope.sort_values(sort_by, ascending=ascending)
         st.dataframe(
-            choose_columns(
-                task_view,
-                [
-                    "Task ID",
-                    "Occupation (O*NET-SOC Title)",
-                    "sector",
-                    "Task",
-                    "automation_exposure_index",
-                    "worker_pull_index",
-                    "human_complementarity_index",
-                    "innovation_momentum_index",
-                    "skill_shift_pressure",
-                    "ai_capability_score",
-                    "worker_desire_score",
-                    "human_agency_score",
-                    "transition_type",
-                    "mismatch_type",
-                    "signal_count",
-                ],
-            ),
+            pd.DataFrame({"Thành phần": list(style_profile.keys()), "Kết luận dùng cho AI Agent": list(style_profile.values())}),
             width="stretch",
             hide_index=True,
-            height=680,
         )
-
-    with model_section:
-        st.subheader("Mô hình khám phá")
-        st.caption(
-            "Ranking này chỉ mang tính khám phá, không phải bằng chứng nhân quả hay xác suất mất việc. Nên dùng để chọn nơi cần phân tích sâu hơn."
-        )
-        if model_occupation.empty or model_sector.empty:
-            st.warning("Chưa thấy CSV output của mô hình. Hãy chạy lại ai_skill_shift_research.ipynb.")
-        else:
-            model_occ = model_occupation.copy()
-            model_sec = model_sector.copy()
-            if selected_sectors:
-                model_occ = model_occ[model_occ["sector"].isin(selected_sectors)]
-                model_sec = model_sec[model_sec["sector"].isin(selected_sectors)]
-            if occupation_query:
-                q = occupation_query.strip().lower()
-                model_occ = model_occ[model_occ["occupation"].astype(str).str.lower().str.contains(q)]
-
-            if show_reliable_only and "reliable_for_ranking" in model_occ.columns:
-                model_occ = model_occ[model_occ["reliable_for_ranking"]]
-            if show_reliable_only and "reliable_for_ranking" in model_sec.columns:
-                model_sec = model_sec[model_sec["reliable_for_ranking"]]
-
-            if not model_occ.empty:
-                model_leader = model_occ.sort_values("exploratory_shift_score", ascending=False).iloc[0]
-                st.info(
-                    "Mô hình hiện xếp cao nhất: "
-                    f"{model_leader['occupation']} với điểm {num(model_leader['exploratory_shift_score'])}. "
-                    "Cần kiểm tra responses/users/tasks trước khi xem thứ hạng này là ổn định."
+        if retrieved_chunks:
+            st.markdown("**Các đoạn code được retrieve vào prompt**")
+            st.dataframe(
+                pd.DataFrame(
+                    {
+                        "File": [chunk["path"] for chunk in retrieved_chunks],
+                        "Symbol/chunk": [chunk["symbol"] for chunk in retrieved_chunks],
+                        "Loại": [chunk["kind"] for chunk in retrieved_chunks],
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+            for chunk in retrieved_chunks[:3]:
+                st.code(
+                    f"# {chunk['path']} :: {chunk['symbol']}\n{chunk['content'][:1800]}",
+                    language="text",
                 )
+        st.code(prompt, language="text")
 
-            top_model_occ = model_occ.sort_values("exploratory_shift_score", ascending=False).head(top_n)
-            horizontal_bar(
-                top_model_occ,
-                x="exploratory_shift_score",
-                y="occupation",
-                color="ai_capability",
-                title="Nghề theo exploratory score",
-                height=390,
+        validation_commands = runnable_validation_commands(repo_profile)
+        st.markdown("**Chạy validation thật trên repo**")
+        if validation_commands:
+            st.write("Các lệnh sẽ chạy:", ", ".join(f"`{cmd}`" for cmd in validation_commands))
+            allow_run = st.checkbox(
+                "Tôi hiểu các lệnh test/lint/build sẽ chạy trong repo đã chọn.",
+                key="allow_repo_validation_run",
             )
-            top_model_sec = model_sec.sort_values("exploratory_shift_score", ascending=False).head(top_n)
-            horizontal_bar(
-                top_model_sec,
-                x="exploratory_shift_score",
-                y="sector",
-                color="ai_capability",
-                title="Ngành theo exploratory score",
-                height=310,
-            )
+            if st.button("Chạy test/lint/build", disabled=not allow_run, key="run_repo_validation_button"):
+                validation_results = run_validation_commands(repo_path, validation_commands)
+                summary_df = pd.DataFrame(
+                    [
+                        {key: value for key, value in result.items() if key != "Log"}
+                        for result in validation_results
+                    ]
+                )
+                st.dataframe(summary_df, width="stretch", hide_index=True)
+                for result in validation_results:
+                    st.code(f"$ {result['Lệnh']}\n{result['Log']}", language="text")
+        else:
+            st.info("Chưa phát hiện lệnh test/lint/build trong repo. Hãy kiểm tra package.json, pyproject.toml hoặc requirements.txt.")
 
-    with table_section:
-        st.subheader("Bảng dữ liệu")
-        st.caption(
-            "Dùng `task` để xem bằng chứng chi tiết, `reliable_skill` cho ranking kỹ năng chính, `occupation`/`sector` cho tổng hợp theo nhóm, và bảng model cho ranking fitted-score khám phá."
+    with st.expander("Vì sao không fine-tune ngay?"):
+        st.markdown(
+            """
+            **Khuyến nghị:** dùng Prompt + RAG trước. Fine-tune chỉ nên dùng khi có nhiều ví dụ before/after,
+            nhiều repo ổn định hoặc muốn học style chung của cả team. Với từng repo thay đổi liên tục,
+            RAG cập nhật nhanh hơn, rẻ hơn và dễ kiểm soát bằng test/lint/build.
+            """
         )
-        table_name = st.selectbox("Bảng", sorted(tables.keys()), key="data_table_name")
-        selected_table = tables[table_name]
-        st.write(f"{table_name}: {selected_table.shape[0]:,} dòng x {selected_table.shape[1]:,} cột")
-        st.download_button(
-            "Tải CSV",
-            selected_table.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
-            file_name=f"{table_name}.csv",
-            mime="text/csv",
-            key="download_table",
-        )
-        st.dataframe(selected_table, width="stretch", hide_index=True, height=620)
 
+
+data = load_data()
+tasks = clean_tasks(data["tasks"])
+filtered_tasks = apply_filters(tasks)
+
+st.title("AI Agent trong ngành khoa học máy tính: sự dịch chuyển kỹ năng")
+st.markdown(
+    """
+    Dashboard này trực quan hóa phân tích từ dữ liệu task/nghề trong nhóm **Computer and Mathematical**.
+    Câu chuyện chính: AI có thể làm tăng tốc độ tạo output kỹ thuật, nhưng chất lượng không tự đảm bảo.
+    Vì vậy kỹ năng trọng tâm dịch chuyển sang review, test, kiểm chứng, bảo mật, maintainability và quản trị AI Agent.
+    """
+)
+
+if tasks.empty:
+    st.error("Không tìm thấy dữ liệu phân tích trong thư mục outputs.")
+    st.stop()
+
+metric_row(tasks, filtered_tasks)
+
+tab_quality, tab_shift, tab_personalize = st.tabs(
+    [
+        "1. AI, output code và chất lượng",
+        "2. Dịch chuyển kỹ năng và reskilling",
+        "3. Cá nhân hóa AI Agent",
+    ]
+)
+
+with tab_quality:
+    st.subheader("AI có thể tăng output, nhưng quality gate vẫn là điểm nghẽn")
+    st.markdown(
+        """
+        <div class="warning-box">
+        <b>Lưu ý quan trọng:</b> dữ liệu hiện tại không đo trực tiếp defect rate, bug production
+        hay failed CI. Vì vậy dashboard không kết luận cứng rằng AI làm chất lượng code giảm.
+        Phân tích dùng các proxy như nhu cầu con người, độ bất định, chuyên môn miền và task critical
+        để chỉ ra nơi cần review/test mạnh hơn khi dùng AI.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    left, right = st.columns([1.4, 1])
+    with left:
+        st.plotly_chart(agent_quadrant(filtered_tasks), width="stretch")
+    with right:
+        st.plotly_chart(group_signal_chart(data["reskill_group"]), width="stretch")
+
+    st.markdown(
+        """
+        <div class="explain-box">
+        <b>Insight chính:</b> các task ở vùng tăng tốc cao nhưng rủi ro chất lượng cao không nên
+        được hiểu là "cứ giao cho agent tự động". Cách triển khai hợp lý hơn là Copilot kèm review,
+        test, logging và cơ chế rollback. Đây là điểm làm rõ câu chuyện: output có thể tăng,
+        nhưng trách nhiệm chất lượng dịch sang con người và quy trình kiểm soát.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    left, right = st.columns([1, 1.15])
+    with left:
+        st.plotly_chart(recommendation_chart(filtered_tasks), width="stretch")
+    with right:
+        st.plotly_chart(regression_chart(data["ols"], data["logit"]), width="stretch")
+
+    regression_simulator(tasks, data["raw_tasks"], data["ols"], data["logit"], data["reg_ref"])
+
+    st.subheader("Các task nên đọc kỹ trước khi tự động hóa")
+    risky = filtered_tasks.dropna(subset=["code_acceleration_potential", "quality_risk_need"]).copy()
+    risky["combined_attention_score"] = (
+        0.45 * risky["code_acceleration_potential"]
+        + 0.45 * risky["quality_risk_need"]
+        + 0.10 * risky["quality_critical_task"].astype(float)
+    )
+    risky = risky.sort_values("combined_attention_score", ascending=False).head(15)
+    st.dataframe(
+        risky[
+            [
+                "Occupation (O*NET-SOC Title)",
+                "Task",
+                "task_group_vi",
+                "quality_critical_task",
+                "code_acceleration_potential",
+                "quality_risk_need",
+                "agent_recommendation",
+            ]
+        ],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Occupation (O*NET-SOC Title)": "Nghề",
+            "Task": "Task",
+            "task_group_vi": "Nhóm task",
+            "quality_critical_task": "Critical",
+            "code_acceleration_potential": st.column_config.ProgressColumn(
+                "Tăng tốc code", min_value=0, max_value=1, format="%.2f"
+            ),
+            "quality_risk_need": st.column_config.ProgressColumn(
+                "Rủi ro chất lượng", min_value=0, max_value=1, format="%.2f"
+            ),
+            "agent_recommendation": "Khuyến nghị",
+        },
+    )
+
+with tab_shift:
+    st.subheader("Sự dịch chuyển kỹ năng: từ tạo code sang quản trị chất lượng code")
+    pathway_view(data["pathway"])
+
+    st.markdown(
+        """
+        <div class="explain-box">
+        <b>Thông điệp để đưa vào báo cáo:</b> kỹ năng lập trình không biến mất.
+        Nó dịch chuyển từ việc tự mình viết từng dòng code sang năng lực định hướng AI,
+        kiểm tra code do AI tạo, thiết kế test, phát hiện lỗi logic, đánh giá kiến trúc
+        và chịu trách nhiệm cuối cùng với chất lượng sản phẩm.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    left, right = st.columns([1.25, 1])
+    with left:
+        top_n = st.slider("Số nghề hiển thị", min_value=5, max_value=20, value=12, step=1)
+        st.plotly_chart(reskill_occ_chart(data["reskill_occ"], top_n), width="stretch")
+    with right:
+        st.plotly_chart(reskill_group_chart(data["reskill_group"]), width="stretch")
+
+    st.subheader("Bảng ưu tiên reskilling theo task")
+    task_table = data["reskill_task"].copy()
+    search = st.text_input(
+        "Tìm task hoặc nghề",
+        placeholder="Ví dụ: security, software, test, architect...",
+    )
+    if search and not task_table.empty:
+        mask = (
+            task_table["Task"].astype(str).str.contains(search, case=False, na=False)
+            | task_table["Occupation (O*NET-SOC Title)"].astype(str).str.contains(search, case=False, na=False)
+            | task_table["task_group_vi"].astype(str).str.contains(search, case=False, na=False)
+        )
+        task_table = task_table[mask]
+
+    task_table = task_table.sort_values("reskilling_priority_score", ascending=False).head(30)
+    st.dataframe(
+        task_table[
+            [
+                "Occupation (O*NET-SOC Title)",
+                "Task",
+                "task_group_vi",
+                "quality_critical_task",
+                "reskilling_priority_score",
+                "code_acceleration_potential",
+                "quality_risk_need",
+                "agent_recommendation",
+            ]
+        ],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Occupation (O*NET-SOC Title)": "Nghề",
+            "Task": "Task",
+            "task_group_vi": "Nhóm task",
+            "quality_critical_task": "Critical",
+            "reskilling_priority_score": st.column_config.ProgressColumn(
+                "Ưu tiên reskilling", min_value=0, max_value=1, format="%.2f"
+            ),
+            "code_acceleration_potential": st.column_config.ProgressColumn(
+                "Tăng tốc code", min_value=0, max_value=1, format="%.2f"
+            ),
+            "quality_risk_need": st.column_config.ProgressColumn(
+                "Rủi ro chất lượng", min_value=0, max_value=1, format="%.2f"
+            ),
+            "agent_recommendation": "Khuyến nghị",
+        },
+    )
+
+    st.markdown(
+        """
+        <div class="warning-box">
+        <b>Khuyến nghị triển khai:</b> bắt đầu với Copilot + review ở các task có điểm reskilling cao,
+        vì đây là nơi AI có thể tăng tốc nhưng con người vẫn phải nắm quality gate.
+        Với task critical như security, troubleshooting, backup, QA và kiến trúc hệ thống,
+        không nên bỏ qua bước review bắt buộc.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with tab_personalize:
+    repo_personalization_solution_view(tasks, data["reskill_task"], data["raw_tasks"])

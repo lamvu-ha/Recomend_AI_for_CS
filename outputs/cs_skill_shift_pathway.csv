@@ -1,0 +1,7 @@
+﻿before_ai,ai_augmented_work,human_premium_skill,related_task_group
+Tự viết code từ đầu,AI tạo bản nháp code,"Review code, kiểm chứng logic, chịu trách nhiệm chất lượng",Sinh code / phát triển
+Viết test thủ công,AI gợi ý test case và edge case,"Thiết kế chiến lược test, chọn case quan trọng",Kiểm thử / QA / review
+Debug bằng kinh nghiệm cá nhân,AI đọc log và gợi ý nguyên nhân lỗi,"Root-cause validation, kiểm chứng giả thuyết lỗi",Kiểm thử / QA / review
+Viết tài liệu kỹ thuật,AI tạo draft tài liệu,Kiểm tra độ chính xác kỹ thuật và compliance,Tài liệu / báo cáo
+Thiết kế hệ thống thủ công,AI gợi ý phương án kiến trúc,"Đánh giá trade-off, bảo mật, maintainability",Kiến trúc / quản trị
+Làm từng task riêng lẻ,Điều phối nhiều agent/tool trong workflow,"Agent orchestration, quality gate, rollback",Task CS khác
