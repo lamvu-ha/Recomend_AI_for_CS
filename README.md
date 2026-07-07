@@ -33,6 +33,8 @@ Các file chính:
 - `outputs/cs_regression_quality_risk_ols.csv`: hồi quy rủi ro chất lượng.
 - `outputs/cs_skill_shift_pathway.csv`: pathway dịch chuyển kỹ năng.
 - `streamlit_app.py`: dashboard trực quan 3 tab.
+- `src/repo_agent/`: core repo-aware AI Agent prototype.
+- `docs/repo_agent_architecture.md`: mô tả kiến trúc Tab 3.
 
 ## 3. Quy trình phân tích
 
@@ -110,29 +112,30 @@ Không nên fine-tune model ngay cho từng repo. Cách phù hợp hơn là:
 
 ```mermaid
 flowchart TD
-    A[User đưa folder repo hoặc file .zip] --> B[Repo Scanner]
+    A[User đưa folder repo hoặc file .zip] --> B[repository.scan_repository]
     B --> C[Nhận diện ngôn ngữ, framework, config, thư mục, lệnh test/lint/build]
-    C --> D[Code Parser + Style Profiler]
+    C --> D[repository.infer_coding_style_profile]
     D --> E[Tạo Coding Style Profile]
-    E --> F[Chunk code theo file/function/class/component]
-    F --> G[Vector Index / Code Search]
-    H[User nhập task coding] --> I[Retrieve file/chunk liên quan]
+    E --> F[retrieval.build_code_index]
+    F --> G[Chunk code theo file/function/class/component]
+    H[User nhập task coding] --> I[retrieval.retrieve_relevant_chunks]
     G --> I
     I --> J[Prompt AI với repo context]
-    J --> K[AI sinh code hoặc PR Decision Log]
-    K --> L[Test/Lint/Build validation]
-    L --> M{Pass?}
-    M -- Có --> N[Đưa code + giải thích + độ tin cậy]
-    M -- Không --> O[Đưa lỗi lại cho AI sửa]
-    O --> L
+    J --> K[decision_log sinh PR Decision Log]
+    C --> L[validation.runnable_validation_commands]
+    L --> M[User xác nhận chạy test/lint/build]
+    M --> N[validation.run_validation_commands]
+    N --> O{Pass?}
+    O -- Có --> P[Kết quả đáng tin cậy hơn]
+    O -- Không --> Q[Đọc log lỗi và sửa tiếp]
 ```
 
-Tab 3 trong Streamlit đã mô phỏng luồng này:
+Tab 3 trong Streamlit đã triển khai prototype luồng này:
 
 - Upload repo dạng `.zip` hoặc nhập path folder.
 - Quét repo và nhận diện framework/config.
 - Rút coding style profile từ code.
-- Chunk code và retrieve đoạn liên quan theo task.
+- Chunk code và retrieve đoạn liên quan theo task bằng token/code search.
 - Sinh PR Decision Log bằng AI từ key trong `.env`.
 - Cho phép chạy validation thật nếu người dùng xác nhận.
 
@@ -187,5 +190,3 @@ Các hình được tạo trong `outputs/figures/`:
 ## 9. Kết luận ngắn
 
 AI Agent không chỉ là công cụ “viết code nhanh hơn”. Trong ngành khoa học máy tính, tác động quan trọng hơn là làm thay đổi vai trò kỹ năng: lập trình viên cần chuyển từ trực tiếp tạo output sang thiết kế yêu cầu, kiểm chứng output, quản trị chất lượng và kiểm soát mức tự động hóa của AI.
-
-Khuyến nghị triển khai phù hợp là **repo-aware AI Agent**: hiểu codebase, dùng RAG để lấy đúng context, sinh code theo style repo và bắt buộc đi qua test/lint/build trước khi tin tưởng kết quả.

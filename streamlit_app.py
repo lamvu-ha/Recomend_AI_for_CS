@@ -1,9 +1,3 @@
-import json
-import os
-import hashlib
-import zipfile
-import re
-import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +6,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from dotenv import load_dotenv
-from openai import OpenAI
+
+import src.repo_agent as repo_agent
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -957,498 +952,8 @@ def extract_known_skills(raw_tasks: pd.DataFrame) -> list[str]:
     return sorted(skills)
 
 
-EXCLUDED_REPO_DIRS = {
-    ".git",
-    ".venv",
-    "venv",
-    "env",
-    "node_modules",
-    "__pycache__",
-    ".next",
-    "dist",
-    "build",
-    "target",
-    ".idea",
-    ".vscode",
-}
-
-LANGUAGE_BY_SUFFIX = {
-    ".py": "Python",
-    ".js": "JavaScript",
-    ".jsx": "React JSX",
-    ".ts": "TypeScript",
-    ".tsx": "React TypeScript",
-    ".java": "Java",
-    ".go": "Go",
-    ".rs": "Rust",
-    ".cs": "C#",
-    ".php": "PHP",
-    ".rb": "Ruby",
-    ".swift": "Swift",
-    ".kt": "Kotlin",
-}
-
-CODE_SUFFIXES = {
-    ".py",
-    ".js",
-    ".jsx",
-    ".ts",
-    ".tsx",
-    ".java",
-    ".go",
-    ".rs",
-    ".cs",
-    ".php",
-    ".rb",
-    ".swift",
-    ".kt",
-}
-
-
 def split_skills(text: str) -> list[str]:
     return [skill.strip() for chunk in text.splitlines() for skill in chunk.split(",") if skill.strip()]
-
-
-def safe_extract_zip(zip_bytes: bytes, original_name: str) -> Path:
-    digest = hashlib.sha256(zip_bytes).hexdigest()[:12]
-    target_dir = OUTPUT_DIR / "uploaded_repos" / digest
-    target_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = target_dir / original_name
-    if not zip_path.exists():
-        zip_path.write_bytes(zip_bytes)
-    extract_dir = target_dir / "repo"
-    extract_dir.mkdir(parents=True, exist_ok=True)
-
-    with zipfile.ZipFile(zip_path) as archive:
-        for member in archive.infolist():
-            member_path = extract_dir / member.filename
-            resolved = member_path.resolve()
-            if not str(resolved).startswith(str(extract_dir.resolve())):
-                continue
-            if member.is_dir():
-                resolved.mkdir(parents=True, exist_ok=True)
-            else:
-                resolved.parent.mkdir(parents=True, exist_ok=True)
-                if not resolved.exists():
-                    with archive.open(member) as src, resolved.open("wb") as dst:
-                        dst.write(src.read())
-
-    children = [p for p in extract_dir.iterdir() if p.is_dir()]
-    files = [p for p in extract_dir.iterdir() if p.is_file()]
-    if len(children) == 1 and not files:
-        return children[0]
-    return extract_dir
-
-
-def scan_repository(repo_text: str) -> dict:
-    repo_path = Path(repo_text.strip().strip('"')).expanduser() if repo_text.strip() else BASE_DIR
-    result = {
-        "path": repo_path,
-        "exists": repo_path.exists() and repo_path.is_dir(),
-        "file_count": 0,
-        "languages": {},
-        "configs": [],
-        "top_dirs": [],
-        "frameworks": [],
-        "scripts": {},
-        "test_commands": [],
-        "lint_commands": [],
-        "build_commands": [],
-        "style_signals": [],
-    }
-    if not result["exists"]:
-        return result
-
-    suffix_counts: dict[str, int] = {}
-    top_dirs: set[str] = set()
-    files: list[Path] = []
-    for root, dirs, filenames in os.walk(repo_path):
-        dirs[:] = [d for d in dirs if d not in EXCLUDED_REPO_DIRS and not d.startswith(".cache")]
-        rel_root = Path(root).relative_to(repo_path)
-        if rel_root.parts:
-            top_dirs.add(rel_root.parts[0])
-        for filename in filenames:
-            path = Path(root) / filename
-            files.append(path)
-            suffix = path.suffix.lower()
-            if suffix:
-                suffix_counts[suffix] = suffix_counts.get(suffix, 0) + 1
-        if len(files) >= 1500:
-            break
-
-    result["file_count"] = len(files)
-    result["top_dirs"] = sorted(top_dirs)[:18]
-    result["languages"] = {
-        LANGUAGE_BY_SUFFIX.get(suffix, suffix): count
-        for suffix, count in sorted(suffix_counts.items(), key=lambda item: item[1], reverse=True)[:8]
-    }
-
-    config_names = {
-        "package.json",
-        "pyproject.toml",
-        "requirements.txt",
-        "setup.py",
-        "tsconfig.json",
-        "vite.config.ts",
-        "next.config.js",
-        "next.config.mjs",
-        "tailwind.config.js",
-        "tailwind.config.ts",
-        "pytest.ini",
-        "ruff.toml",
-        ".eslintrc",
-        ".eslintrc.json",
-        "eslint.config.js",
-        "vitest.config.ts",
-        "jest.config.js",
-        "Dockerfile",
-    }
-    result["configs"] = sorted({path.name for path in files if path.name in config_names})
-
-    package_path = repo_path / "package.json"
-    if package_path.exists():
-        try:
-            package_data = json.loads(package_path.read_text(encoding="utf-8"))
-            deps = {**package_data.get("dependencies", {}), **package_data.get("devDependencies", {})}
-            scripts = package_data.get("scripts", {})
-            result["scripts"] = scripts
-            if "react" in deps:
-                result["frameworks"].append("React")
-            if "next" in deps:
-                result["frameworks"].append("Next.js")
-            if "vue" in deps:
-                result["frameworks"].append("Vue")
-            if "express" in deps:
-                result["frameworks"].append("Express")
-            if "zustand" in deps:
-                result["style_signals"].append("State management có dấu hiệu dùng Zustand.")
-            if "tailwindcss" in deps:
-                result["style_signals"].append("CSS có dấu hiệu dùng Tailwind.")
-            if "typescript" in deps or (repo_path / "tsconfig.json").exists():
-                result["frameworks"].append("TypeScript")
-                result["style_signals"].append("Có TypeScript, nên ưu tiên type rõ ràng và không bỏ qua lỗi type.")
-            for name, command in scripts.items():
-                lowered = name.lower()
-                if "test" in lowered:
-                    result["test_commands"].append(f"npm run {name}")
-                if "lint" in lowered:
-                    result["lint_commands"].append(f"npm run {name}")
-                if "build" in lowered:
-                    result["build_commands"].append(f"npm run {name}")
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            result["style_signals"].append("Có package.json nhưng chưa đọc được nội dung.")
-
-    pyproject_path = repo_path / "pyproject.toml"
-    requirements_path = repo_path / "requirements.txt"
-    if pyproject_path.exists() or requirements_path.exists():
-        result["frameworks"].append("Python")
-        py_text = ""
-        for path in [pyproject_path, requirements_path]:
-            if path.exists():
-                try:
-                    py_text += "\n" + path.read_text(encoding="utf-8", errors="ignore").lower()
-                except OSError:
-                    pass
-        if "fastapi" in py_text:
-            result["frameworks"].append("FastAPI")
-        if "django" in py_text:
-            result["frameworks"].append("Django")
-        if "pytest" in py_text or (repo_path / "pytest.ini").exists():
-            result["test_commands"].append("pytest")
-        if "ruff" in py_text or (repo_path / "ruff.toml").exists():
-            result["lint_commands"].append("ruff check .")
-        if "mypy" in py_text:
-            result["lint_commands"].append("mypy .")
-
-    if any(name in result["top_dirs"] for name in ["src", "app", "components"]):
-        result["style_signals"].append("Code chính có vẻ được tách theo thư mục src/app/components.")
-    if any("test" in name.lower() for name in result["top_dirs"]) or any(path.name.endswith((".test.ts", ".test.tsx", "_test.py")) for path in files[:500]):
-        result["style_signals"].append("Có cấu trúc test trong repo, AI phải thêm/sửa test cùng thay đổi logic.")
-
-    result["frameworks"] = sorted(set(result["frameworks"])) or ["Chưa nhận diện rõ"]
-    result["test_commands"] = sorted(set(result["test_commands"])) or ["Chưa phát hiện, cần hỏi người dùng"]
-    result["lint_commands"] = sorted(set(result["lint_commands"])) or ["Chưa phát hiện, cần hỏi người dùng"]
-    result["build_commands"] = sorted(set(result["build_commands"])) or ["Chưa phát hiện, cần hỏi người dùng"]
-    result["style_signals"] = result["style_signals"] or ["Chưa đủ tín hiệu; cần đọc thêm code mẫu trước khi sinh code."]
-    return result
-
-
-def iter_code_files(repo_path: Path, limit: int = 160) -> list[Path]:
-    if not repo_path.exists() or not repo_path.is_dir():
-        return []
-    files: list[Path] = []
-    for root, dirs, filenames in os.walk(repo_path):
-        dirs[:] = [d for d in dirs if d not in EXCLUDED_REPO_DIRS and not d.startswith(".cache")]
-        for filename in filenames:
-            path = Path(root) / filename
-            if path.suffix.lower() in CODE_SUFFIXES and path.stat().st_size <= 240_000:
-                files.append(path)
-        if len(files) >= limit:
-            break
-    return files[:limit]
-
-
-def read_repo_text(path: Path, max_chars: int = 80_000) -> str:
-    try:
-        return path.read_text(encoding="utf-8", errors="ignore")[:max_chars]
-    except OSError:
-        return ""
-
-
-def infer_coding_style_profile(repo_path: Path, repo_profile: dict) -> list[str]:
-    files = iter_code_files(repo_path, limit=120)
-    samples = "\n".join(read_repo_text(path, max_chars=12_000) for path in files[:80])
-    signals = list(repo_profile.get("style_signals", []))
-
-    tsconfig_path = repo_path / "tsconfig.json"
-    if tsconfig_path.exists():
-        tsconfig = read_repo_text(tsconfig_path, max_chars=20_000).lower()
-        if '"strict": true' in tsconfig or '"strict":true' in tsconfig:
-            signals.append("Dùng TypeScript strict.")
-
-    if re.search(r"export\s+(function|const)\s+[A-Z][A-Za-z0-9_]*", samples):
-        signals.append("Component có xu hướng dùng named export.")
-    if re.search(r"function\s+[A-Z][A-Za-z0-9_]*\s*\(|const\s+[A-Z][A-Za-z0-9_]*\s*=", samples):
-        signals.append("Component đặt tên PascalCase.")
-    if re.search(r"\buse[A-Z][A-Za-z0-9_]*\s*\(", samples):
-        signals.append("Hook đặt tên theo pattern useSomething.")
-    if "Promise<" in samples or re.search(r"async\s+function|async\s*\(", samples):
-        signals.append("API/helper bất đồng bộ nên giữ kiểu trả về async/Promise.")
-    if "try {" in samples and "catch" in samples:
-        signals.append("Error thường được xử lý bằng try/catch.")
-    if "toast.error" in samples or "toast(" in samples:
-        signals.append("Thông báo lỗi có dấu hiệu dùng toast.")
-    if "className=" in samples and any(token in samples for token in ["flex ", "grid ", "text-", "bg-", "rounded-"]):
-        signals.append("UI có dấu hiệu dùng Tailwind/class utility.")
-    if not re.search(r"class\s+[A-Z][A-Za-z0-9_]*\s+extends\s+React", samples):
-        signals.append("Không thấy class component React nổi bật; ưu tiên functional component nếu là React.")
-    if any(path.name.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx", "_test.py", "test.py")) for path in files):
-        signals.append("Có test trong repo; AI nên thêm/sửa test cùng thay đổi logic.")
-    if re.search(r"from\s+\.[\w.]+\s+import|import\s+{[^}]+}\s+from", samples):
-        signals.append("Cần giữ convention import/export hiện có thay vì tạo đường dẫn mới tùy tiện.")
-
-    deduped: list[str] = []
-    for signal in signals:
-        if signal and signal not in deduped:
-            deduped.append(signal)
-    return deduped[:10] or ["Chưa đủ code mẫu để rút style; cần retrieve thêm file liên quan."]
-
-
-def split_code_chunks(path: Path, repo_path: Path, text: str) -> list[dict]:
-    rel = path.relative_to(repo_path).as_posix()
-    pattern = re.compile(
-        r"(?m)^(?:export\s+)?(?:async\s+)?(?:function|class|interface|type)\s+([A-Za-z_][\w]*)|"
-        r"(?m)^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_][\w]*)\s*="
-    )
-    matches = list(pattern.finditer(text))
-    if not matches:
-        return [{"path": rel, "symbol": path.stem, "kind": "file", "content": text[:4200]}]
-
-    chunks: list[dict] = []
-    for idx, match in enumerate(matches[:18]):
-        start = match.start()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else min(len(text), start + 5200)
-        symbol = match.group(1) or match.group(2) or path.stem
-        chunks.append(
-            {
-                "path": rel,
-                "symbol": symbol,
-                "kind": "symbol",
-                "content": text[start:end][:4200],
-            }
-        )
-    return chunks
-
-
-def build_code_index(repo_path: Path) -> list[dict]:
-    chunks: list[dict] = []
-    for path in iter_code_files(repo_path, limit=140):
-        text = read_repo_text(path, max_chars=70_000)
-        if text.strip():
-            chunks.extend(split_code_chunks(path, repo_path, text))
-        if len(chunks) >= 500:
-            break
-    return chunks[:500]
-
-
-def tokenize_for_search(text: str) -> set[str]:
-    return {token.lower() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)}
-
-
-def retrieve_relevant_chunks(chunks: list[dict], query: str, top_k: int = 5) -> list[dict]:
-    query_terms = tokenize_for_search(query)
-    if not query_terms:
-        return chunks[:top_k]
-    scored: list[tuple[float, dict]] = []
-    for chunk in chunks:
-        path_terms = tokenize_for_search(chunk["path"].replace("/", " "))
-        symbol_terms = tokenize_for_search(chunk["symbol"])
-        content_terms = tokenize_for_search(chunk["content"][:3000])
-        score_value = (
-            3.0 * len(query_terms & path_terms)
-            + 2.5 * len(query_terms & symbol_terms)
-            + 1.0 * len(query_terms & content_terms)
-        )
-        if score_value:
-            scored.append((score_value, chunk))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    return [chunk for _, chunk in scored[:top_k]] or chunks[:top_k]
-
-
-def runnable_validation_commands(repo_profile: dict) -> list[str]:
-    commands: list[str] = []
-    for key in ["test_commands", "lint_commands", "build_commands"]:
-        for command in repo_profile.get(key, []):
-            if command and "Chưa phát hiện" not in command and command not in commands:
-                commands.append(command)
-    return commands[:4]
-
-
-def run_validation_commands(repo_path: Path, commands: list[str], timeout_sec: int = 60) -> list[dict]:
-    results: list[dict] = []
-    for command in commands:
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=repo_path,
-                shell=True,
-                text=True,
-                capture_output=True,
-                timeout=timeout_sec,
-            )
-            output = (completed.stdout or "") + ("\n" + completed.stderr if completed.stderr else "")
-            results.append(
-                {
-                    "Lệnh": command,
-                    "Exit code": completed.returncode,
-                    "Kết quả": "Pass" if completed.returncode == 0 else "Fail",
-                    "Log": output[-5000:] if output else "(không có output)",
-                }
-            )
-        except subprocess.TimeoutExpired as exc:
-            output = (exc.stdout or "") + ("\n" + exc.stderr if exc.stderr else "")
-            results.append(
-                {
-                    "Lệnh": command,
-                    "Exit code": "timeout",
-                    "Kết quả": "Timeout",
-                    "Log": output[-5000:] if output else f"Lệnh vượt quá {timeout_sec} giây.",
-                }
-            )
-    return results
-
-
-def build_decision_log(
-    user_task: str,
-    repo_profile: dict,
-    style_profile: dict,
-    selected_control: str,
-    selected_control_row: pd.Series,
-    retrieved_chunks: list[dict],
-) -> dict:
-    files = [f"{chunk['path']} :: {chunk['symbol']}" for chunk in retrieved_chunks]
-    validation = runnable_validation_commands(repo_profile)
-    style_lines = [
-        line.strip("- ").strip()
-        for line in str(style_profile.get("Coding style rút ra", "")).splitlines()
-        if line.strip()
-    ]
-    return {
-        "title": user_task.strip() or "Tác vụ chưa đặt tên",
-        "files": files,
-        "reasons": [
-            f"Giữ đúng repo style: {', '.join(style_lines[:3]) if style_lines else style_profile.get('Framework/ngôn ngữ', 'chưa rõ')}.",
-            f"Chỉ dùng context đã retrieve từ {len(files)} đoạn code liên quan thay vì nhét toàn bộ repo vào prompt.",
-            f"Tuân thủ mức kiểm soát {selected_control}: {selected_control_row['AI được làm']}",
-        ],
-        "tradeoffs": [
-            "Không fine-tune model ngay, vì repo thay đổi thường xuyên và RAG cập nhật nhanh hơn.",
-            "Không tạo abstraction mới nếu chưa thấy pattern tương tự trong các file retrieve được.",
-            "Nếu thiếu file liên quan, AI phải yêu cầu retrieve thêm thay vì đoán kiến trúc.",
-        ],
-        "risks": [
-            "Có thể retrieve thiếu context nếu tên task quá chung chung.",
-            "Code sinh ra phải qua test/lint/build trước khi được merge.",
-            f"Con người vẫn giữ quyền: {selected_control_row['Con người phải làm']}",
-        ],
-        "validation": validation or ["Chưa phát hiện lệnh test/lint/build; cần khai báo trong package.json hoặc pyproject.toml."],
-    }
-
-
-def ai_configured() -> bool:
-    return bool(os.getenv("DASHSCOPE_API_KEY") and os.getenv("DASHSCOPE_BASE_URL") and os.getenv("DASHSCOPE_MODEL"))
-
-
-def build_ai_decision_log_text(
-    user_task: str,
-    repo_profile: dict,
-    style_profile: dict,
-    selected_control: str,
-    selected_control_row: pd.Series,
-    retrieved_chunks: list[dict],
-) -> str:
-    if not ai_configured():
-        raise RuntimeError("Thiếu DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL hoặc DASHSCOPE_MODEL trong .env.")
-
-    client = OpenAI(
-        api_key=os.getenv("DASHSCOPE_API_KEY"),
-        base_url=os.getenv("DASHSCOPE_BASE_URL"),
-    )
-    context_snippets = "\n\n".join(
-        f"### {chunk['path']} :: {chunk['symbol']}\n```text\n{chunk['content'][:1600]}\n```"
-        for chunk in retrieved_chunks[:5]
-    )
-    if not context_snippets:
-        context_snippets = "Chưa retrieve được code context; hãy nói rõ cần retrieve thêm trước khi code."
-
-    validation = runnable_validation_commands(repo_profile)
-    prompt = f"""Hãy viết một PR Decision Log bằng tiếng Việt cho AI coding agent.
-
-Tác vụ/PR:
-{user_task}
-
-Repo style:
-- Framework/ngôn ngữ: {style_profile.get("Framework/ngôn ngữ", "chưa rõ")}
-- Cấu trúc project: {style_profile.get("Cấu trúc project", "chưa rõ")}
-- Config quan trọng: {style_profile.get("Config quan trọng", "chưa rõ")}
-- Coding style rút ra:
-{style_profile.get("Coding style rút ra", "chưa rõ")}
-- Skill/convention bổ sung: {style_profile.get("Skill/convention bổ sung", "chưa khai báo")}
-
-Mức kiểm soát AI Agent:
-- {selected_control}
-- AI được làm: {selected_control_row['AI được làm']}
-- Con người phải làm: {selected_control_row['Con người phải làm']}
-
-Code context retrieve từ repo:
-{context_snippets}
-
-Validation cần chạy:
-{chr(10).join(f"- {cmd}" for cmd in validation) if validation else "- Chưa phát hiện lệnh test/lint/build; cần yêu cầu người dùng bổ sung."}
-
-Yêu cầu output:
-- Có tiêu đề PR.
-- Có mục File/context được dùng.
-- Có mục Lý do chọn hướng xử lý.
-- Có mục Trade-off.
-- Có mục Rủi ro & cách kiểm soát.
-- Có mục Validation.
-- Có mục Kết luận ngắn về mức độ tin cậy.
-- Không bịa file không có trong context.
-- Nếu context thiếu, nói rõ cần retrieve thêm.
-"""
-    response = client.chat.completions.create(
-        model=os.getenv("DASHSCOPE_MODEL"),
-        messages=[
-            {
-                "role": "system",
-                "content": "Bạn là senior software engineer viết PR Decision Log rõ ràng, ngắn gọn, có trách nhiệm chất lượng.",
-            },
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.2,
-    )
-    return response.choices[0].message.content or ""
 
 
 def repo_agent_pipeline_chart() -> go.Figure:
@@ -1635,7 +1140,7 @@ def occupation_scope_view(tasks: pd.DataFrame, reskill_task: pd.DataFrame, raw_t
         help="Vì Streamlit chạy local, bạn có thể nhập path folder trên máy để app nhận diện cấu trúc repo.",
         key="repo_folder_path",
     )
-    repo_profile = scan_repository(repo_text)
+    repo_profile = repo_agent.scan_repository(repo_text)
 
     if not repo_profile["exists"]:
         st.error("Không tìm thấy folder repo. Hãy kiểm tra lại đường dẫn.")
@@ -2058,7 +1563,7 @@ def repo_personalization_solution_view(tasks: pd.DataFrame, reskill_task: pd.Dat
                 key="repo_zip_uploader",
             )
             if uploaded_repo is not None:
-                repo_root = safe_extract_zip(uploaded_repo.getvalue(), uploaded_repo.name)
+                repo_root = repo_agent.safe_extract_zip(uploaded_repo.getvalue(), uploaded_repo.name)
                 repo_text = str(repo_root)
                 st.caption(f"Đã nạp repo từ ZIP: {repo_root}")
             else:
@@ -2088,9 +1593,9 @@ def repo_personalization_solution_view(tasks: pd.DataFrame, reskill_task: pd.Dat
             key="compact_skill_text",
         )
 
-    repo_profile = scan_repository(repo_text)
+    repo_profile = repo_agent.scan_repository(repo_text)
     repo_path = Path(repo_profile["path"])
-    inferred_style = infer_coding_style_profile(repo_path, repo_profile) if repo_profile["exists"] else []
+    inferred_style = repo_agent.infer_coding_style_profile(repo_path, repo_profile) if repo_profile["exists"] else []
     occ_tasks = tasks[tasks["Occupation (O*NET-SOC Title)"].eq(selected_occ)].copy()
     known_skills = extract_known_skills(raw_tasks)
     selected_skills = st.multiselect(
@@ -2209,8 +1714,8 @@ def repo_personalization_solution_view(tasks: pd.DataFrame, reskill_task: pd.Dat
                 value="Tích hợp Rate-Limiter (Redis Lua script)",
                 key="repo_user_task_compact",
             )
-            code_index = build_code_index(repo_path) if repo_profile["exists"] else []
-            retrieved_chunks = retrieve_relevant_chunks(code_index, user_task, top_k=5)
+            code_index = repo_agent.build_code_index(repo_path) if repo_profile["exists"] else []
+            retrieved_chunks = repo_agent.retrieve_relevant_chunks(code_index, user_task, top_k=5)
             st.caption(
                 f"Đã tạo {len(code_index)} code chunks và retrieve {len(retrieved_chunks)} đoạn liên quan cho task này."
             )
@@ -2224,7 +1729,7 @@ def repo_personalization_solution_view(tasks: pd.DataFrame, reskill_task: pd.Dat
             if st.button("Sinh Thuyết minh Quyết định bằng AI", key="fake_pr_defense_button"):
                 with st.spinner("Đang gọi AI để sinh Decision Log từ repo context..."):
                     try:
-                        ai_text = build_ai_decision_log_text(
+                        ai_text = repo_agent.build_ai_decision_log_text(
                             user_task=user_task,
                             repo_profile=repo_profile,
                             style_profile=style_profile,
@@ -2239,7 +1744,7 @@ def repo_personalization_solution_view(tasks: pd.DataFrame, reskill_task: pd.Dat
                             "markdown": ai_text,
                         }
                     except Exception as exc:
-                        fallback_log = build_decision_log(
+                        fallback_log = repo_agent.build_decision_log(
                             user_task=user_task,
                             repo_profile=repo_profile,
                             style_profile=style_profile,
@@ -2412,7 +1917,7 @@ Quy tắc bắt buộc:
                 )
         st.code(prompt, language="text")
 
-        validation_commands = runnable_validation_commands(repo_profile)
+        validation_commands = repo_agent.runnable_validation_commands(repo_profile)
         st.markdown("**Chạy validation thật trên repo**")
         if validation_commands:
             st.write("Các lệnh sẽ chạy:", ", ".join(f"`{cmd}`" for cmd in validation_commands))
@@ -2421,7 +1926,7 @@ Quy tắc bắt buộc:
                 key="allow_repo_validation_run",
             )
             if st.button("Chạy test/lint/build", disabled=not allow_run, key="run_repo_validation_button"):
-                validation_results = run_validation_commands(repo_path, validation_commands)
+                validation_results = repo_agent.run_validation_commands(repo_path, validation_commands)
                 summary_df = pd.DataFrame(
                     [
                         {key: value for key, value in result.items() if key != "Log"}
